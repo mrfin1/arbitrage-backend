@@ -15,11 +15,11 @@ const GAP_THRESHOLD = parseFloat(process.env.GAP_THRESHOLD || '1.5');
 const PORT = process.env.PORT || 3001;
 
 // ── Stato interno ────────────────────────────────────────
-let krakenPrices = {};      // { 'BTC/USD': 67240.5, ... }
-let polyPrices = {};        // { 'BTC': 0.71, ... }
-let gapHistory = [];        // ultimi 500 gap rilevati
-let lastAlertTime = {};     // anti-spam: un alert ogni 5 minuti per asset
-let connectedClients = [];  // frontend connessi via WebSocket
+let krakenPrices = {};
+let polyPrices = {};
+let gapHistory = [];
+let lastAlertTime = {};
+let connectedClients = [];
 
 // ── Telegram ─────────────────────────────────────────────
 async function sendTelegram(message) {
@@ -41,7 +41,6 @@ function calcolaGap(asset) {
   const ppx = polyPrices[asset];
   if (!kpx || !ppx) return null;
 
-  // Prezzo implicito Polymarket (probabilità × prezzo atteso)
   const polyEquiv = ppx * kpx * 1.4;
   const gapPercent = ((kpx - polyEquiv) / kpx) * 100;
   const gapDollari = Math.abs(kpx - polyEquiv);
@@ -85,12 +84,9 @@ async function controllaGap() {
     if (!gap) continue;
 
     gaps.push(gap);
-
-    // Salva nello storico (max 500 punti)
     gapHistory.push(gap);
     if (gapHistory.length > 500) gapHistory.shift();
 
-    // Se supera la soglia → alert Telegram
     if (Math.abs(gap.gapPercent) >= GAP_THRESHOLD && puoMandareAlert(asset)) {
       const emoji = gap.gapPercent > 0 ? '🟢' : '🔴';
       const msg = `${emoji} <b>GAP RILEVATO — ${asset}/USD</b>\n\n` +
@@ -103,7 +99,6 @@ async function controllaGap() {
     }
   }
 
-  // Invia i dati al frontend in tempo reale
   broadcast({ type: 'gaps', data: gaps });
 }
 
@@ -116,10 +111,7 @@ function connettiKraken() {
     console.log('[Kraken] Connesso');
     ws.send(JSON.stringify({
       method: 'subscribe',
-      params: {
-        channel: 'ticker',
-        symbol: ['BTC/USD', 'ETH/USD', 'SOL/USD']
-      }
+      params: { channel: 'ticker', symbol: ['BTC/USD', 'ETH/USD', 'SOL/USD'] }
     }));
   });
 
@@ -127,11 +119,9 @@ function connettiKraken() {
     try {
       const msg = JSON.parse(raw);
       if (msg.channel === 'ticker' && msg.data) {
-        msg.data.forEach(tick => {
-          krakenPrices[tick.symbol] = tick.last;
-        });
+        msg.data.forEach(tick => { krakenPrices[tick.symbol] = tick.last; });
       }
-    } catch (e) { /* ignora messaggi non JSON */ }
+    } catch (e) {}
   });
 
   ws.on('close', () => {
@@ -139,58 +129,69 @@ function connettiKraken() {
     setTimeout(connettiKraken, 5000);
   });
 
-  ws.on('error', (err) => {
-    console.error('[Kraken] Errore:', err.message);
-  });
+  ws.on('error', (err) => console.error('[Kraken] Errore:', err.message));
 }
 
-// ── Fetch prezzi Polymarket ───────────────────────────────
+// ── Fetch prezzi Polymarket (ricerca dinamica mercati attivi) ──
 async function fetchPolymarket() {
   try {
-    // Mercati crypto su Polymarket (slug pubblici)
-    const mercati = [
-      { asset: 'BTC', slug: 'will-btc-hit-80k-before-2025' },
-      { asset: 'ETH', slug: 'will-eth-reach-4000-in-2025' },
-      { asset: 'SOL', slug: 'will-sol-reach-200-in-2025'  }
-    ];
+    const keywords = {
+      BTC: ['bitcoin', 'btc'],
+      ETH: ['ethereum', 'eth'],
+      SOL: ['solana', 'sol']
+    };
 
-    for (const m of mercati) {
+    for (const [asset, kws] of Object.entries(keywords)) {
       try {
-        const res = await axios.get(
-          `https://gamma-api.polymarket.com/markets?slug=${m.slug}`,
-          { timeout: 5000 }
-        );
-        if (res.data && res.data[0] && res.data[0].outcomePrices) {
-          const prices = JSON.parse(res.data[0].outcomePrices);
-          polyPrices[m.asset] = parseFloat(prices[0]);
+        const res = await axios.get('https://gamma-api.polymarket.com/markets', {
+          params: { active: true, limit: 20, order: 'volume', ascending: false },
+          timeout: 8000
+        });
+
+        if (!res.data || !res.data.length) continue;
+
+        const mercati = res.data.filter(m => {
+          const testo = (m.question || m.title || m.slug || '').toLowerCase();
+          return kws.some(k => testo.includes(k)) && m.outcomePrices;
+        });
+
+        if (mercati.length > 0) {
+          const mercato = mercati[0];
+          const prices = typeof mercato.outcomePrices === 'string'
+            ? JSON.parse(mercato.outcomePrices)
+            : mercato.outcomePrices;
+
+          const prezzo = parseFloat(prices[0]);
+          if (!isNaN(prezzo) && prezzo > 0 && prezzo < 1) {
+            polyPrices[asset] = prezzo;
+            console.log(`[Polymarket] ${asset}: ${prezzo} — "${mercato.question || mercato.slug}"`);
+          }
         }
       } catch (e) {
-        // fallback: usa prezzo precedente o simulato
-        if (!polyPrices[m.asset]) {
-          polyPrices[m.asset] = m.asset === 'BTC' ? 0.71 : m.asset === 'ETH' ? 0.44 : 0.62;
-        }
+        console.error(`[Polymarket] Errore per ${asset}:`, e.message);
       }
     }
-    console.log('[Polymarket] Prezzi aggiornati:', polyPrices);
   } catch (err) {
-    console.error('[Polymarket] Errore fetch:', err.message);
+    console.error('[Polymarket] Errore generale:', err.message);
   }
 }
 
 // ── Routes HTTP ───────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    krakenAssets: Object.keys(krakenPrices).length,
+    polyAssets: Object.keys(polyPrices).length
+  });
 });
 
-app.get('/gaps/history', (req, res) => {
-  res.json(gapHistory.slice(-100));
-});
+app.get('/gaps/history', (req, res) => res.json(gapHistory.slice(-100)));
 
 app.get('/prices', (req, res) => {
   res.json({ kraken: krakenPrices, polymarket: polyPrices });
 });
 
-// Test alert manuale
 app.post('/test-alert', async (req, res) => {
   await sendTelegram('🧪 <b>Test alert</b> — sistema operativo!');
   res.json({ ok: true });
@@ -206,23 +207,14 @@ const wss = new WebSocket.Server({ server });
 wss.on('connection', (ws) => {
   console.log('[WS] Frontend connesso');
   connectedClients.push(ws);
-
-  // Manda subito lo stato attuale
   ws.send(JSON.stringify({ type: 'prices', data: { kraken: krakenPrices, polymarket: polyPrices } }));
-
-  ws.on('close', () => {
-    console.log('[WS] Frontend disconnesso');
-  });
+  ws.on('close', () => console.log('[WS] Frontend disconnesso'));
 });
 
 // ── Avvio ─────────────────────────────────────────────────
 connettiKraken();
 fetchPolymarket();
-
-// Aggiorna Polymarket ogni 30 secondi
 setInterval(fetchPolymarket, 30000);
-
-// Controlla i gap ogni 2 secondi
 setInterval(controllaGap, 2000);
 
 console.log('[Sistema] Arbitrage Terminal backend avviato');
