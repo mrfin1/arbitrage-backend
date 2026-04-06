@@ -169,3 +169,4 @@ setInterval(fetchPolymarket, 15000);
 setInterval(controllaGap, 3000);
 console.log('[Sistema] Backend avviato');
 sendTelegram('Backend Arbitrage Terminal avviato');
+
