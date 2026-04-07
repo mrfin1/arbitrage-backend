@@ -59,20 +59,23 @@ async function fetchPolymarket() {
     // 15m: intervalli di 900 secondi
     var ts5m_curr  = nowSec - (nowSec % 300);
     var ts5m_next  = ts5m_curr + 300;
+    var ts5m_prev  = ts5m_curr - 300;
     var ts15m_curr = nowSec - (nowSec % 900);
     var ts15m_next = ts15m_curr + 900;
 
     var slugsToTry = [
-      { slug: 'btc-updown-5m-' + ts5m_curr,  finestra: '5m',  ts: ts5m_curr,  closeAt: ts5m_next },
-      { slug: 'btc-updown-5m-' + ts5m_next,  finestra: '5m',  ts: ts5m_next,  closeAt: ts5m_next + 300 },
-      { slug: 'btc-updown-15m-' + ts15m_curr, finestra: '15m', ts: ts15m_curr, closeAt: ts15m_next },
-      { slug: 'btc-updown-15m-' + ts15m_next, finestra: '15m', ts: ts15m_next, closeAt: ts15m_next + 900 },
+      { slug: 'btc-updown-5m-' + ts5m_prev,  finestra: '5m',  closeAt: ts5m_curr },
+      { slug: 'btc-updown-5m-' + ts5m_curr,  finestra: '5m',  closeAt: ts5m_next },
+      { slug: 'btc-updown-5m-' + ts5m_next,  finestra: '5m',  closeAt: ts5m_next + 300 },
+      { slug: 'btc-updown-15m-' + ts15m_curr, finestra: '15m', closeAt: ts15m_next },
+      { slug: 'btc-updown-15m-' + ts15m_next, finestra: '15m', closeAt: ts15m_next + 900 },
+      { slug: 'btc-updown-15m-' + (ts15m_next + 900), finestra: '15m', closeAt: ts15m_next + 1800 },
     ];
 
     for (var i = 0; i < slugsToTry.length; i++) {
       var item = slugsToTry[i];
       var minRimasti = (item.closeAt - nowSec) / 60;
-      if (minRimasti < 0.2) continue; // già scaduto
+      if (minRimasti < 0 || minRimasti > 25) continue;
 
       try {
         var r = await axios.get('https://gamma-api.polymarket.com/markets', {
@@ -93,12 +96,15 @@ async function fetchPolymarket() {
 
         if (isNaN(upPrice) || isNaN(downPrice)) continue;
 
-        // Price to beat: dal campo startPrice oppure usa prezzo Kraken corrente
-        var priceToBeat = m.startPrice ? parseFloat(m.startPrice) : (krakenPrices['BTC/USD'] || null);
+        // Price to beat: dal campo startPrice, startMidpoint, o prezzo Kraken corrente
+        var priceToBeat = null;
+        if (m.startPrice && parseFloat(m.startPrice) > 1000) priceToBeat = parseFloat(m.startPrice);
+        else if (m.startMidpoint && parseFloat(m.startMidpoint) > 1000) priceToBeat = parseFloat(m.startMidpoint);
+        else priceToBeat = krakenPrices['BTC/USD'] || null;
 
-        // Aggiorna solo se non abbiamo già un mercato più fresco per questa finestra
+        // Aggiorna sempre con il mercato con meno tempo rimasto (più vicino alla scadenza)
         var existing = polyMarkets[item.finestra].BTC;
-        if (existing && existing.minRimasti > minRimasti && minRimasti > 0.5) continue;
+        if (existing && existing.minRimasti <= minRimasti && existing.minRimasti > 0) continue;
 
         polyMarkets[item.finestra].BTC = {
           question:    m.question || item.slug,
