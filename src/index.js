@@ -52,109 +52,77 @@ function calcolaPnlNetto(prezzoContratto) {
 
 async function fetchPolymarket() {
   try {
-    var now = Date.now();
-    var found5m = false;
-    var found15m = false;
+    var nowSec = Math.floor(Date.now() / 1000);
 
-    // Strategia 1: cerca per slug btc-updown con volume recente
-    var endpoints = [
-      'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&order=volume24hr&ascending=false',
-      'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&order=end_date_min&ascending=true'
+    // Calcola slug deterministico basato su timestamp Unix
+    // 5m: intervalli di 300 secondi
+    // 15m: intervalli di 900 secondi
+    var ts5m_curr  = nowSec - (nowSec % 300);
+    var ts5m_next  = ts5m_curr + 300;
+    var ts15m_curr = nowSec - (nowSec % 900);
+    var ts15m_next = ts15m_curr + 900;
+
+    var slugsToTry = [
+      { slug: 'btc-updown-5m-' + ts5m_curr,  finestra: '5m',  ts: ts5m_curr,  closeAt: ts5m_next },
+      { slug: 'btc-updown-5m-' + ts5m_next,  finestra: '5m',  ts: ts5m_next,  closeAt: ts5m_next + 300 },
+      { slug: 'btc-updown-15m-' + ts15m_curr, finestra: '15m', ts: ts15m_curr, closeAt: ts15m_next },
+      { slug: 'btc-updown-15m-' + ts15m_next, finestra: '15m', ts: ts15m_next, closeAt: ts15m_next + 900 },
     ];
 
-    var allMarkets = [];
-    for (var e = 0; e < endpoints.length; e++) {
+    for (var i = 0; i < slugsToTry.length; i++) {
+      var item = slugsToTry[i];
+      var minRimasti = (item.closeAt - nowSec) / 60;
+      if (minRimasti < 0.2) continue; // già scaduto
+
       try {
-        var r = await axios.get(endpoints[e], { timeout: 8000 });
-        if (r.data && r.data.length) {
-          allMarkets = allMarkets.concat(r.data);
-        }
-      } catch(err) { console.log('[Poly] endpoint ' + e + ' fallito'); }
-    }
+        var r = await axios.get('https://gamma-api.polymarket.com/markets', {
+          params: { slug: item.slug },
+          timeout: 6000
+        });
 
-    // Deduplicazione per id
-    var seen = {};
-    allMarkets = allMarkets.filter(function(m) {
-      if (seen[m.id]) return false;
-      seen[m.id] = true;
-      return true;
-    });
+        if (!r.data || !r.data.length) continue;
 
-    console.log('[Polymarket] Totale mercati ricevuti: ' + allMarkets.length);
+        var m = r.data[0];
+        if (!m.outcomePrices) continue;
 
-    // Filtra mercati BTC up/down con scadenza futura
-    var btcUpDown = allMarkets.filter(function(m) {
-      var t = (m.question || m.slug || '').toLowerCase();
-      var isBtcUpDown = t.includes('bitcoin up or down') || t.includes('btc-updown') || t.includes('btc up or down');
-      if (!isBtcUpDown) return false;
-      if (!m.outcomePrices) return false;
-      if (m.closed) return false;
-      var endStr = m.endDate || m.endDateIso || m.end_date_iso;
-      if (!endStr) return false;
-      var minR = (new Date(endStr) - now) / 60000;
-      return minR > 0.3;
-    }).map(function(m) {
-      var endStr = m.endDate || m.endDateIso || m.end_date_iso;
-      var minR = (new Date(endStr) - now) / 60000;
-      return Object.assign({}, m, { minRimasti: minR });
-    });
+        var prices = typeof m.outcomePrices === 'string'
+          ? JSON.parse(m.outcomePrices) : m.outcomePrices;
 
-    console.log('[Polymarket] Mercati BTC Up/Down attivi: ' + btcUpDown.length);
-    btcUpDown.forEach(function(m) {
-      console.log('  -> ' + m.question + ' | ' + m.minRimasti.toFixed(1) + 'min');
-    });
+        var upPrice   = parseFloat(prices[0]);
+        var downPrice = parseFloat(prices[1]);
 
-    // Scegli migliore per 5m (scade entro 6 min) e 15m (scade entro 17 min)
-    var best5m  = btcUpDown.filter(function(m){ return m.minRimasti <= 6; })
-                           .sort(function(a,b){ return a.minRimasti - b.minRimasti; })[0];
-    var best15m = btcUpDown.filter(function(m){ return m.minRimasti > 6 && m.minRimasti <= 17; })
-                           .sort(function(a,b){ return a.minRimasti - b.minRimasti; })[0];
+        if (isNaN(upPrice) || isNaN(downPrice)) continue;
 
-    // Se non troviamo niente nella finestra 15m, prendi quello con più tempo rimasto fino a 20min
-    if (!best15m) {
-      best15m = btcUpDown.filter(function(m){ return m.minRimasti > 6 && m.minRimasti <= 25; })
-                         .sort(function(a,b){ return a.minRimasti - b.minRimasti; })[0];
-    }
+        // Price to beat: dal campo startPrice oppure usa prezzo Kraken corrente
+        var priceToBeat = m.startPrice ? parseFloat(m.startPrice) : (krakenPrices['BTC/USD'] || null);
 
-    [['5m', best5m], ['15m', best15m]].forEach(function(pair) {
-      var fin = pair[0]; var mercato = pair[1];
-      if (!mercato) {
-        console.log('[Poly ' + fin + '] Nessun mercato trovato');
-        return;
-      }
-      try {
-        var prices = typeof mercato.outcomePrices === 'string'
-          ? JSON.parse(mercato.outcomePrices) : mercato.outcomePrices;
+        // Aggiorna solo se non abbiamo già un mercato più fresco per questa finestra
+        var existing = polyMarkets[item.finestra].BTC;
+        if (existing && existing.minRimasti > minRimasti && minRimasti > 0.5) continue;
 
-        // Price to beat: dal campo startPrice o dalla domanda
-        var priceToBeat = null;
-        if (mercato.startPrice) priceToBeat = parseFloat(mercato.startPrice);
-        if (!priceToBeat && mercato.question) {
-          // es: "Bitcoin Up or Down - April 7, 2:15AM-2:20AM ET"
-          // il price to beat è nei dati del contratto, non nel titolo
-          // usiamo il prezzo Kraken attuale come approssimazione
-          priceToBeat = krakenPrices['BTC/USD'] || null;
-        }
-
-        polyMarkets[fin].BTC = {
-          question:   mercato.question || mercato.slug,
-          prezzoUp:   parseFloat((parseFloat(prices[0]) * 100).toFixed(1)),
-          prezzoDown: parseFloat((parseFloat(prices[1]) * 100).toFixed(1)),
+        polyMarkets[item.finestra].BTC = {
+          question:    m.question || item.slug,
+          slug:        item.slug,
+          prezzoUp:    parseFloat((upPrice * 100).toFixed(1)),
+          prezzoDown:  parseFloat((downPrice * 100).toFixed(1)),
           priceToBeat: priceToBeat,
-          minRimasti: parseFloat(mercato.minRimasti.toFixed(2)),
-          volume:     mercato.volume24hr || mercato.volume || 0,
-          aggiornato: new Date().toISOString()
+          minRimasti:  parseFloat(minRimasti.toFixed(2)),
+          volume:      m.volume24hr || m.volume || 0,
+          aggiornato:  new Date().toISOString()
         };
-        console.log('[Poly ' + fin + '] ✓ UP:' + polyMarkets[fin].BTC.prezzoUp +
-          'c DN:' + polyMarkets[fin].BTC.prezzoDown +
-          'c | ' + mercato.minRimasti.toFixed(1) + 'min | ' + mercato.question);
+
+        console.log('[Poly ' + item.finestra + '] ✓ slug:' + item.slug +
+          ' UP:' + polyMarkets[item.finestra].BTC.prezzoUp + 'c' +
+          ' DN:' + polyMarkets[item.finestra].BTC.prezzoDown + 'c' +
+          ' ' + minRimasti.toFixed(1) + 'min rimasti');
+
       } catch(e) {
-        console.error('[Poly ' + fin + '] Errore parsing:', e.message);
+        // slug non trovato — normale, proviamo il prossimo
       }
-    });
+    }
 
   } catch(err) {
-    console.error('[Polymarket] Errore generale:', err.message);
+    console.error('[Polymarket] Errore:', err.message);
   }
 }
 
