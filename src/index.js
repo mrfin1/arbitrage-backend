@@ -52,43 +52,110 @@ function calcolaPnlNetto(prezzoContratto) {
 
 async function fetchPolymarket() {
   try {
-    const res = await axios.get('https://gamma-api.polymarket.com/markets', {
-      params: { active: true, limit: 50, order: 'volume', ascending: false },
-      timeout: 8000
-    });
-    if (!res.data || !res.data.length) return;
-    const now = Date.now();
-    const btcMarkets = res.data.filter(m => {
-      const t = (m.question || m.slug || '').toLowerCase();
-      return (t.includes('bitcoin') || t.includes('btc')) &&
-             (t.includes('up') || t.includes('down') || t.includes('above') || t.includes('below')) &&
-             m.outcomePrices;
-    }).map(m => {
-      const endStr = m.endDate || m.end_date_iso;
-      const minRimasti = endStr ? (new Date(endStr) - now) / 60000 : null;
-      return Object.assign({}, m, { minRimasti });
-    }).filter(m => m.minRimasti !== null && m.minRimasti > 0.5 && m.minRimasti <= 20);
+    var now = Date.now();
+    var found5m = false;
+    var found15m = false;
 
-    const best5m  = btcMarkets.filter(m => m.minRimasti <= 6).sort((a,b) => (b.volume||0)-(a.volume||0))[0];
-    const best15m = btcMarkets.filter(m => m.minRimasti > 6 && m.minRimasti <= 17).sort((a,b) => (b.volume||0)-(a.volume||0))[0];
+    // Strategia 1: cerca per slug btc-updown con volume recente
+    var endpoints = [
+      'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&order=volume24hr&ascending=false',
+      'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&order=end_date_min&ascending=true'
+    ];
 
-    [['5m', best5m], ['15m', best15m]].forEach(([finestra, mercato]) => {
-      if (!mercato) return;
+    var allMarkets = [];
+    for (var e = 0; e < endpoints.length; e++) {
       try {
-        const prices = typeof mercato.outcomePrices === 'string' ? JSON.parse(mercato.outcomePrices) : mercato.outcomePrices;
-        const targetMatch = (mercato.question || '').match(/\$?([\d,]+)/g);
-        const priceToBeat = targetMatch ? parseFloat(targetMatch[targetMatch.length-1].replace(/[\$,]/g,'')) : null;
-        polyMarkets[finestra].BTC = {
-          question: mercato.question || mercato.slug,
-          prezzoUp: parseFloat((parseFloat(prices[0])*100).toFixed(1)),
-          prezzoDown: parseFloat((parseFloat(prices[1])*100).toFixed(1)),
-          priceToBeat, minRimasti: parseFloat(mercato.minRimasti.toFixed(2)),
-          volume: mercato.volume || 0, aggiornato: new Date().toISOString()
-        };
-        console.log('[Poly ' + finestra + '] UP:' + polyMarkets[finestra].BTC.prezzoUp + 'c DN:' + polyMarkets[finestra].BTC.prezzoDown + 'c Target:$' + priceToBeat + ' ' + mercato.minRimasti.toFixed(1) + 'min');
-      } catch(e) { console.error('[Poly ' + finestra + ']', e.message); }
+        var r = await axios.get(endpoints[e], { timeout: 8000 });
+        if (r.data && r.data.length) {
+          allMarkets = allMarkets.concat(r.data);
+        }
+      } catch(err) { console.log('[Poly] endpoint ' + e + ' fallito'); }
+    }
+
+    // Deduplicazione per id
+    var seen = {};
+    allMarkets = allMarkets.filter(function(m) {
+      if (seen[m.id]) return false;
+      seen[m.id] = true;
+      return true;
     });
-  } catch(err) { console.error('[Polymarket]', err.message); }
+
+    console.log('[Polymarket] Totale mercati ricevuti: ' + allMarkets.length);
+
+    // Filtra mercati BTC up/down con scadenza futura
+    var btcUpDown = allMarkets.filter(function(m) {
+      var t = (m.question || m.slug || '').toLowerCase();
+      var isBtcUpDown = t.includes('bitcoin up or down') || t.includes('btc-updown') || t.includes('btc up or down');
+      if (!isBtcUpDown) return false;
+      if (!m.outcomePrices) return false;
+      if (m.closed) return false;
+      var endStr = m.endDate || m.endDateIso || m.end_date_iso;
+      if (!endStr) return false;
+      var minR = (new Date(endStr) - now) / 60000;
+      return minR > 0.3;
+    }).map(function(m) {
+      var endStr = m.endDate || m.endDateIso || m.end_date_iso;
+      var minR = (new Date(endStr) - now) / 60000;
+      return Object.assign({}, m, { minRimasti: minR });
+    });
+
+    console.log('[Polymarket] Mercati BTC Up/Down attivi: ' + btcUpDown.length);
+    btcUpDown.forEach(function(m) {
+      console.log('  -> ' + m.question + ' | ' + m.minRimasti.toFixed(1) + 'min');
+    });
+
+    // Scegli migliore per 5m (scade entro 6 min) e 15m (scade entro 17 min)
+    var best5m  = btcUpDown.filter(function(m){ return m.minRimasti <= 6; })
+                           .sort(function(a,b){ return a.minRimasti - b.minRimasti; })[0];
+    var best15m = btcUpDown.filter(function(m){ return m.minRimasti > 6 && m.minRimasti <= 17; })
+                           .sort(function(a,b){ return a.minRimasti - b.minRimasti; })[0];
+
+    // Se non troviamo niente nella finestra 15m, prendi quello con più tempo rimasto fino a 20min
+    if (!best15m) {
+      best15m = btcUpDown.filter(function(m){ return m.minRimasti > 6 && m.minRimasti <= 25; })
+                         .sort(function(a,b){ return a.minRimasti - b.minRimasti; })[0];
+    }
+
+    [['5m', best5m], ['15m', best15m]].forEach(function(pair) {
+      var fin = pair[0]; var mercato = pair[1];
+      if (!mercato) {
+        console.log('[Poly ' + fin + '] Nessun mercato trovato');
+        return;
+      }
+      try {
+        var prices = typeof mercato.outcomePrices === 'string'
+          ? JSON.parse(mercato.outcomePrices) : mercato.outcomePrices;
+
+        // Price to beat: dal campo startPrice o dalla domanda
+        var priceToBeat = null;
+        if (mercato.startPrice) priceToBeat = parseFloat(mercato.startPrice);
+        if (!priceToBeat && mercato.question) {
+          // es: "Bitcoin Up or Down - April 7, 2:15AM-2:20AM ET"
+          // il price to beat è nei dati del contratto, non nel titolo
+          // usiamo il prezzo Kraken attuale come approssimazione
+          priceToBeat = krakenPrices['BTC/USD'] || null;
+        }
+
+        polyMarkets[fin].BTC = {
+          question:   mercato.question || mercato.slug,
+          prezzoUp:   parseFloat((parseFloat(prices[0]) * 100).toFixed(1)),
+          prezzoDown: parseFloat((parseFloat(prices[1]) * 100).toFixed(1)),
+          priceToBeat: priceToBeat,
+          minRimasti: parseFloat(mercato.minRimasti.toFixed(2)),
+          volume:     mercato.volume24hr || mercato.volume || 0,
+          aggiornato: new Date().toISOString()
+        };
+        console.log('[Poly ' + fin + '] ✓ UP:' + polyMarkets[fin].BTC.prezzoUp +
+          'c DN:' + polyMarkets[fin].BTC.prezzoDown +
+          'c | ' + mercato.minRimasti.toFixed(1) + 'min | ' + mercato.question);
+      } catch(e) {
+        console.error('[Poly ' + fin + '] Errore parsing:', e.message);
+      }
+    });
+
+  } catch(err) {
+    console.error('[Polymarket] Errore generale:', err.message);
+  }
 }
 
 async function controllaGap() {
@@ -145,6 +212,32 @@ function connettiKraken() {
   ws.on('error', err => console.error('[Kraken]', err.message));
 }
 
+
+// DEBUG — mostra mercati raw da Polymarket
+app.get('/debug/polymarket', async function(req, res) {
+  try {
+    const r = await axios.get('https://gamma-api.polymarket.com/markets', {
+      params: { active: true, limit: 50, order: 'volume', ascending: false },
+      timeout: 10000
+    });
+    const markets = r.data || [];
+    const btc = markets.filter(m => {
+      const t = (m.question || m.slug || '').toLowerCase();
+      return t.includes('bitcoin') || t.includes('btc');
+    }).map(m => ({
+      question: m.question,
+      slug: m.slug,
+      endDate: m.endDate || m.end_date_iso || m.endDateIso,
+      outcomePrices: m.outcomePrices,
+      volume: m.volume,
+      active: m.active
+    }));
+    res.json({ total: markets.length, btc_count: btc.length, btc_markets: btc });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 app.get('/health', (req, res) => res.json({
   status: 'ok', timestamp: new Date().toISOString(),
   kraken: Object.keys(krakenPrices).length > 0,
@@ -169,4 +262,3 @@ setInterval(fetchPolymarket, 15000);
 setInterval(controllaGap, 3000);
 console.log('[Sistema] Backend avviato');
 sendTelegram('Backend Arbitrage Terminal avviato');
-
