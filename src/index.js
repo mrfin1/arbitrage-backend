@@ -19,6 +19,10 @@ let gapHistory = [];
 let lastAlertTime = {};
 const VOLATILITY_PER_MIN = 30;
 
+// ── Report storage (in memoria su Railway) ────────────────
+let reportData = [];
+const REPORT_MAX = 10000; // max 10k righe in memoria
+
 async function sendTelegram(message) {
   try {
     await axios.post('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage', {
@@ -48,6 +52,26 @@ function calcolaScore(distanza, minRimasti) {
 
 function calcolaPnlNetto(prezzoContratto) {
   return parseFloat(((100 - prezzoContratto) - 3).toFixed(2));
+}
+
+function registraReport(krakenPrice, finestra, polyMkt, score, direzione, pnlNetto) {
+  const entry = {
+    ts: new Date().toISOString(),
+    time: new Date().toUTCString().slice(17, 25),
+    finestra,
+    krakenPrice: parseFloat(krakenPrice.toFixed(2)),
+    priceToBeat: polyMkt.priceToBeat,
+    distanza: parseFloat((krakenPrice - (polyMkt.priceToBeat || krakenPrice)).toFixed(2)),
+    minRimasti: parseFloat(polyMkt.minRimasti.toFixed(2)),
+    score: parseFloat(score.toFixed(4)),
+    prezzoUp: polyMkt.prezzoUp,
+    prezzoDown: polyMkt.prezzoDown,
+    direzione: direzione || null,
+    pnl1k: pnlNetto ? parseFloat((pnlNetto / 100 * 1000).toFixed(2)) : null,
+    volume: polyMkt.volume || 0
+  };
+  reportData.push(entry);
+  if (reportData.length > REPORT_MAX) reportData.shift();
 }
 
 async function fetchPolymarket() {
@@ -219,6 +243,43 @@ app.get('/health', (req, res) => res.json({
   polymarket15m: !!polyMarkets['15m'].BTC
 }));
 app.get('/prices', (req, res) => res.json({ kraken: krakenPrices, polymarkets: polyMarkets }));
+app.get('/report', function(req, res) {
+  var limit = parseInt(req.query.limit) || 5000;
+  var data = reportData.slice(-limit);
+  var signals = data.filter(function(r) { return r.direzione !== null; });
+  var scores = data.map(function(r) { return Math.abs(r.score); });
+  var avgScore = scores.length ? scores.reduce(function(s,v){return s+v;},0)/scores.length : 0;
+  var maxScore = scores.length ? Math.max.apply(null, scores) : 0;
+  var totalPnl = signals.reduce(function(s,r){return s+(r.pnl1k||0);},0);
+  res.json({
+    meta: {
+      totalEntries: data.length,
+      signals: signals.length,
+      avgScore: parseFloat(avgScore.toFixed(4)),
+      maxScore: parseFloat(maxScore.toFixed(4)),
+      totalPnl1k: parseFloat(totalPnl.toFixed(2)),
+      scoreThreshold: 1.0,
+      from: data.length ? data[0].ts : null,
+      to: data.length ? data[data.length-1].ts : null
+    },
+    log: data
+  });
+});
+
+app.get('/report/csv', function(req, res) {
+  var data = reportData;
+  if (!data.length) { res.send('Nessun dato'); return; }
+  var sep = ',';
+  var headers = ['#','timestamp','finestra','kraken_usd','price_to_beat','distanza_usd','min_rimasti','score','up_cents','down_cents','segnale','pnl_1k_usd','volume'];
+  var rows = data.map(function(r, i) {
+    return [i+1, r.ts, r.finestra, r.krakenPrice, r.priceToBeat||'', r.distanza, r.minRimasti, r.score, r.prezzoUp, r.prezzoDown, r.direzione||'ATTESA', r.pnl1k||'', r.volume].join(sep);
+  });
+  var csv = headers.join(sep) + '\n' + rows.join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename=arbitrage_report.csv');
+  res.send(csv);
+});
+
 app.get('/signals/history', (req, res) => res.json(gapHistory.slice(-200)));
 app.post('/test-alert', async (req, res) => { await sendTelegram('Test alert ok!'); res.json({ ok: true }); });
 
