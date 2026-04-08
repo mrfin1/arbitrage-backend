@@ -99,7 +99,7 @@ async function fetchPolymarket() {
     for (var i = 0; i < slugsToTry.length; i++) {
       var item = slugsToTry[i];
       var minRimasti = (item.closeAt - nowSec) / 60;
-      if (minRimasti < 0 || minRimasti > 25) continue;
+      if (minRimasti < 2 || minRimasti > 25) continue; // minimo 2 min per avere tempo di operare
 
       try {
         var r = await axios.get('https://gamma-api.polymarket.com/markets', {
@@ -293,7 +293,7 @@ wss.on('connection', ws => {
 
 connettiKraken();
 fetchPolymarket();
-setInterval(fetchPolymarket, 15000);
+setInterval(fetchPolymarket, 5000);
 setInterval(controllaGap, 3000);
 console.log('[Sistema] Backend avviato');
 sendTelegram('Backend Arbitrage Terminal avviato');
