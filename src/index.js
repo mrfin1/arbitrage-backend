@@ -12,17 +12,33 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const PORT = process.env.PORT || 3001;
 
+// ── Stato ────────────────────────────────────────────────
 let krakenPrices = {};
-let polyMarkets = { '5m': { BTC: null }, '15m': { BTC: null } };
+let polyMarkets = {
+  '5m':  { BTC: null, ETH: null, SOL: null, XRP: null, DOGE: null },
+  '15m': { BTC: null, ETH: null, SOL: null, XRP: null, DOGE: null }
+};
 let connectedClients = [];
 let gapHistory = [];
-let lastAlertTime = {};
-const VOLATILITY_PER_MIN = 30;
-
-// ── Report storage (in memoria su Railway) ────────────────
 let reportData = [];
-const REPORT_MAX = 10000; // max 10k righe in memoria
+let lastAlertTime = {};
 
+const REPORT_MAX = 10000;
+
+const ASSETS = [
+  { key: 'BTC',  prefix: 'btc-updown',  krakenSym: 'BTC/USD',  volPerMin: 30   },
+  { key: 'ETH',  prefix: 'eth-updown',  krakenSym: 'ETH/USD',  volPerMin: 2    },
+  { key: 'SOL',  prefix: 'sol-updown',  krakenSym: 'SOL/USD',  volPerMin: 0.5  },
+  { key: 'XRP',  prefix: 'xrp-updown',  krakenSym: 'XRP/USD',  volPerMin: 0.05 },
+  { key: 'DOGE', prefix: 'doge-updown', krakenSym: 'DOGE/USD', volPerMin: 0.01 }
+];
+
+const FINESTRE = [
+  { key: '5m',  interval: 300 },
+  { key: '15m', interval: 900 }
+];
+
+// ── Telegram ─────────────────────────────────────────────
 async function sendTelegram(message) {
   try {
     await axios.post('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage', {
@@ -39,26 +55,38 @@ function puoMandareAlert(key) {
   return false;
 }
 
+// ── Broadcast WebSocket ───────────────────────────────────
 function broadcast(data) {
   const msg = JSON.stringify(data);
   connectedClients = connectedClients.filter(c => c.readyState === WebSocket.OPEN);
   connectedClients.forEach(c => c.send(msg));
 }
 
-function calcolaScore(distanza, minRimasti) {
+// ── Formula score ─────────────────────────────────────────
+function calcolaScore(distanza, minRimasti, volPerMin) {
   if (minRimasti <= 0) return 0;
-  return parseFloat((distanza / (VOLATILITY_PER_MIN * minRimasti)).toFixed(4));
+  return parseFloat((distanza / (volPerMin * minRimasti)).toFixed(4));
 }
 
 function calcolaPnlNetto(prezzoContratto) {
   return parseFloat(((100 - prezzoContratto) - 3).toFixed(2));
 }
 
-function registraReport(krakenPrice, finestra, polyMkt, score, direzione, pnlNetto) {
-  const entry = {
+// Verifica se l'operazione è realmente profittevole
+// Il contratto non deve costare più di 75c (altrimenti guadagno < 22c lordi)
+function isOperazioneProfittevole(prezzoContratto, pnlNetto) {
+  if (!prezzoContratto || !pnlNetto) return false;
+  if (prezzoContratto > 75) return false;  // mercato già prezzato
+  if (pnlNetto < 5) return false;           // minimo 5c netti
+  return true;
+}
+
+// ── Report ────────────────────────────────────────────────
+function registraReport(asset, finestra, krakenPrice, polyMkt, score, direzione, pnlNetto) {
+  reportData.push({
     ts: new Date().toISOString(),
-    time: new Date().toUTCString().slice(17, 25),
-    finestra,
+    asset: asset,
+    finestra: finestra,
     krakenPrice: parseFloat(krakenPrice.toFixed(2)),
     priceToBeat: polyMkt.priceToBeat,
     distanza: parseFloat((krakenPrice - (polyMkt.priceToBeat || krakenPrice)).toFixed(2)),
@@ -66,191 +94,198 @@ function registraReport(krakenPrice, finestra, polyMkt, score, direzione, pnlNet
     score: parseFloat(score.toFixed(4)),
     prezzoUp: polyMkt.prezzoUp,
     prezzoDown: polyMkt.prezzoDown,
+    prezzoContratto: direzione ? (direzione === 'UP' ? polyMkt.prezzoUp : polyMkt.prezzoDown) : null,
     direzione: direzione || null,
+    profittevole: isOperazioneProfittevole(
+      direzione ? (direzione === 'UP' ? polyMkt.prezzoUp : polyMkt.prezzoDown) : null,
+      pnlNetto
+    ),
     pnl1k: pnlNetto ? parseFloat((pnlNetto / 100 * 1000).toFixed(2)) : null,
     volume: polyMkt.volume || 0
-  };
-  reportData.push(entry);
+  });
   if (reportData.length > REPORT_MAX) reportData.shift();
 }
 
+// ── Fetch Polymarket multi-asset ──────────────────────────
 async function fetchPolymarket() {
-  try {
-    var nowSec = Math.floor(Date.now() / 1000);
+  const nowSec = Math.floor(Date.now() / 1000);
 
-    // Calcola slug deterministico basato su timestamp Unix
-    // 5m: intervalli di 300 secondi
-    // 15m: intervalli di 900 secondi
-    var ts5m_curr  = nowSec - (nowSec % 300);
-    var ts5m_next  = ts5m_curr + 300;
-    var ts5m_prev  = ts5m_curr - 300;
-    var ts15m_curr = nowSec - (nowSec % 900);
-    var ts15m_next = ts15m_curr + 900;
+  for (const asset of ASSETS) {
+    for (const fin of FINESTRE) {
+      const interval = fin.interval;
+      const ts_curr = nowSec - (nowSec % interval);
+      const slugsToTry = [
+        { slug: asset.prefix + '-' + fin.key + '-' + (ts_curr - interval), closeAt: ts_curr },
+        { slug: asset.prefix + '-' + fin.key + '-' + ts_curr,              closeAt: ts_curr + interval },
+        { slug: asset.prefix + '-' + fin.key + '-' + (ts_curr + interval), closeAt: ts_curr + interval * 2 }
+      ];
 
-    var slugsToTry = [
-      { slug: 'btc-updown-5m-' + ts5m_prev,  finestra: '5m',  closeAt: ts5m_curr },
-      { slug: 'btc-updown-5m-' + ts5m_curr,  finestra: '5m',  closeAt: ts5m_next },
-      { slug: 'btc-updown-5m-' + ts5m_next,  finestra: '5m',  closeAt: ts5m_next + 300 },
-      { slug: 'btc-updown-15m-' + ts15m_curr, finestra: '15m', closeAt: ts15m_next },
-      { slug: 'btc-updown-15m-' + ts15m_next, finestra: '15m', closeAt: ts15m_next + 900 },
-      { slug: 'btc-updown-15m-' + (ts15m_next + 900), finestra: '15m', closeAt: ts15m_next + 1800 },
-    ];
+      for (const item of slugsToTry) {
+        const minRimasti = (item.closeAt - nowSec) / 60;
+        if (minRimasti < 2 || minRimasti > 25) continue;
 
-    for (var i = 0; i < slugsToTry.length; i++) {
-      var item = slugsToTry[i];
-      var minRimasti = (item.closeAt - nowSec) / 60;
-      if (minRimasti < 2 || minRimasti > 25) continue; // minimo 2 min per avere tempo di operare
+        // Skip se abbiamo già un mercato valido per questo asset/finestra
+        const existing = polyMarkets[fin.key][asset.key];
+        if (existing && existing.minRimasti >= minRimasti && existing.minRimasti > 2) continue;
 
-      try {
-        var r = await axios.get('https://gamma-api.polymarket.com/markets', {
-          params: { slug: item.slug },
-          timeout: 6000
-        });
+        try {
+          const r = await axios.get('https://gamma-api.polymarket.com/markets', {
+            params: { slug: item.slug }, timeout: 5000
+          });
+          if (!r.data || !r.data.length) continue;
+          const m = r.data[0];
+          if (!m.outcomePrices) continue;
 
-        if (!r.data || !r.data.length) continue;
+          const prices = typeof m.outcomePrices === 'string'
+            ? JSON.parse(m.outcomePrices) : m.outcomePrices;
+          const upPrice   = parseFloat(prices[0]);
+          const downPrice = parseFloat(prices[1]);
+          if (isNaN(upPrice) || isNaN(downPrice)) continue;
 
-        var m = r.data[0];
-        if (!m.outcomePrices) continue;
+          const priceToBeat = (m.startPrice && parseFloat(m.startPrice) > 0)
+            ? parseFloat(m.startPrice)
+            : (krakenPrices[asset.krakenSym] || null);
 
-        var prices = typeof m.outcomePrices === 'string'
-          ? JSON.parse(m.outcomePrices) : m.outcomePrices;
+          polyMarkets[fin.key][asset.key] = {
+            question:    m.question || item.slug,
+            slug:        item.slug,
+            prezzoUp:    parseFloat((upPrice * 100).toFixed(1)),
+            prezzoDown:  parseFloat((downPrice * 100).toFixed(1)),
+            priceToBeat: priceToBeat,
+            minRimasti:  parseFloat(minRimasti.toFixed(2)),
+            volume:      m.volume24hr || m.volume || 0,
+            aggiornato:  new Date().toISOString()
+          };
 
-        var upPrice   = parseFloat(prices[0]);
-        var downPrice = parseFloat(prices[1]);
-
-        if (isNaN(upPrice) || isNaN(downPrice)) continue;
-
-        // Price to beat: dal campo startPrice, startMidpoint, o prezzo Kraken corrente
-        var priceToBeat = null;
-        if (m.startPrice && parseFloat(m.startPrice) > 1000) priceToBeat = parseFloat(m.startPrice);
-        else if (m.startMidpoint && parseFloat(m.startMidpoint) > 1000) priceToBeat = parseFloat(m.startMidpoint);
-        else priceToBeat = krakenPrices['BTC/USD'] || null;
-
-        // Aggiorna sempre con il mercato con meno tempo rimasto (più vicino alla scadenza)
-        var existing = polyMarkets[item.finestra].BTC;
-        if (existing && existing.minRimasti <= minRimasti && existing.minRimasti > 0) continue;
-
-        polyMarkets[item.finestra].BTC = {
-          question:    m.question || item.slug,
-          slug:        item.slug,
-          prezzoUp:    parseFloat((upPrice * 100).toFixed(1)),
-          prezzoDown:  parseFloat((downPrice * 100).toFixed(1)),
-          priceToBeat: priceToBeat,
-          minRimasti:  parseFloat(minRimasti.toFixed(2)),
-          volume:      m.volume24hr || m.volume || 0,
-          aggiornato:  new Date().toISOString()
-        };
-
-        console.log('[Poly ' + item.finestra + '] ✓ slug:' + item.slug +
-          ' UP:' + polyMarkets[item.finestra].BTC.prezzoUp + 'c' +
-          ' DN:' + polyMarkets[item.finestra].BTC.prezzoDown + 'c' +
-          ' ' + minRimasti.toFixed(1) + 'min rimasti');
-
-      } catch(e) {
-        // slug non trovato — normale, proviamo il prossimo
+          console.log('[Poly ' + asset.key + '/' + fin.key + '] ' +
+            polyMarkets[fin.key][asset.key].prezzoUp + 'c/' +
+            polyMarkets[fin.key][asset.key].prezzoDown + 'c | ' +
+            minRimasti.toFixed(1) + 'min');
+          break;
+        } catch(e) { /* slug non trovato */ }
       }
     }
-
-  } catch(err) {
-    console.error('[Polymarket] Errore:', err.message);
   }
 }
 
+// ── Controlla segnali ─────────────────────────────────────
 async function controllaGap() {
-  const btcPrice = krakenPrices['BTC/USD'];
-  if (!btcPrice) return;
-  const segnali = [];
-  for (const finestra of ['5m', '15m']) {
-    const m = polyMarkets[finestra].BTC;
-    if (!m || !m.priceToBeat || m.minRimasti < 0.5) continue;
-    const distanza = btcPrice - m.priceToBeat;
-    const score = calcolaScore(distanza, m.minRimasti);
-    const direzione = score > 1.0 ? 'UP' : score < -1.0 ? 'DOWN' : null;
-    const prezzoContratto = direzione === 'UP' ? m.prezzoUp : direzione === 'DOWN' ? m.prezzoDown : null;
-    const pnlNetto = direzione ? calcolaPnlNetto(prezzoContratto) : null;
-    const profittevole = pnlNetto !== null && pnlNetto > 0;
-    const segnale = {
-      asset: 'BTC', finestra, krakenPrice: btcPrice, priceToBeat: m.priceToBeat,
-      distanzaDollar: parseFloat(distanza.toFixed(2)), minRimasti: m.minRimasti,
-      score: parseFloat(score.toFixed(4)), direzione, prezzoContratto, pnlNetto,
-      profittevole, question: m.question, timestamp: new Date().toISOString()
-    };
-    segnali.push(segnale);
-    gapHistory.push(segnale);
-    if (gapHistory.length > 1000) gapHistory.shift();
-    if (profittevole && direzione && puoMandareAlert('BTC-' + finestra + '-' + direzione)) {
-      const msg = (direzione === 'UP' ? 'UP' : 'DOWN') + ' SEGNALE BTC/' + finestra +
-        '\nKraken: $' + btcPrice.toLocaleString('en') +
-        '\nTarget: $' + m.priceToBeat.toLocaleString('en') +
-        '\nDistanza: ' + (distanza > 0 ? '+' : '') + distanza.toFixed(0) + '$' +
-        '\nTempo: ' + m.minRimasti.toFixed(1) + ' min' +
-        '\nScore: ' + score.toFixed(2) +
-        '\nContratto: ' + prezzoContratto + 'c' +
-        '\nP&L $1K: +$' + (pnlNetto / 100 * 1000).toFixed(2);
-      await sendTelegram(msg);
+  // Resetta mercati scaduti
+  for (const fin of FINESTRE) {
+    for (const asset of ASSETS) {
+      const m = polyMarkets[fin.key][asset.key];
+      if (m && m.minRimasti < 0.5) {
+        polyMarkets[fin.key][asset.key] = null;
+      }
     }
   }
+
+  const segnali = [];
+
+  for (const asset of ASSETS) {
+    const assetPrice = krakenPrices[asset.krakenSym];
+    if (!assetPrice) continue;
+
+    for (const fin of FINESTRE) {
+      const m = polyMarkets[fin.key][asset.key];
+      if (!m || !m.priceToBeat || m.minRimasti < 2) continue;
+
+      const distanza = assetPrice - m.priceToBeat;
+      const score = calcolaScore(distanza, m.minRimasti, asset.volPerMin);
+      const direzione = score > 1.0 ? 'UP' : score < -1.0 ? 'DOWN' : null;
+      const prezzoContratto = direzione === 'UP' ? m.prezzoUp : direzione === 'DOWN' ? m.prezzoDown : null;
+      const pnlNetto = direzione ? calcolaPnlNetto(prezzoContratto) : null;
+      const profittevole = pnlNetto !== null && pnlNetto > 0;
+
+      const segnale = {
+        asset: asset.key,
+        finestra: fin.key,
+        krakenPrice: assetPrice,
+        priceToBeat: m.priceToBeat,
+        distanzaDollar: parseFloat(distanza.toFixed(2)),
+        minRimasti: m.minRimasti,
+        score: parseFloat(score.toFixed(4)),
+        direzione,
+        prezzoContratto,
+        pnlNetto,
+        profittevole,
+        question: m.question,
+        timestamp: new Date().toISOString()
+      };
+
+      segnali.push(segnale);
+      gapHistory.push(segnale);
+      if (gapHistory.length > 1000) gapHistory.shift();
+
+      registraReport(asset.key, fin.key, assetPrice, m, score, direzione, pnlNetto);
+
+      if (profittevole && direzione && puoMandareAlert(asset.key + '-' + fin.key + '-' + direzione)) {
+        const emoji = direzione === 'UP' ? 'UP' : 'DOWN';
+        const msg = emoji + ' SEGNALE ' + asset.key + '/' + fin.key +
+          '\nKraken: $' + assetPrice.toLocaleString('en') +
+          '\nTarget: $' + m.priceToBeat.toLocaleString('en') +
+          '\nDistanza: ' + (distanza > 0 ? '+' : '') + distanza.toFixed(2) + '$' +
+          '\nTempo: ' + m.minRimasti.toFixed(1) + ' min' +
+          '\nScore: ' + score.toFixed(2) +
+          '\nContratto: ' + prezzoContratto + 'c' +
+          '\nP&L $1K: +$' + (pnlNetto / 100 * 1000).toFixed(2);
+        await sendTelegram(msg);
+      }
+    }
+  }
+
   broadcast({ type: 'signals', data: segnali });
   broadcast({ type: 'polymarkets', data: polyMarkets });
 }
 
+// ── Kraken WebSocket ──────────────────────────────────────
 function connettiKraken() {
   const ws = new WebSocket('wss://ws.kraken.com/v2');
   ws.on('open', () => {
     console.log('[Kraken] Connesso');
-    ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: ['BTC/USD'] } }));
+    ws.send(JSON.stringify({
+      method: 'subscribe',
+      params: { channel: 'ticker', symbol: ['BTC/USD','ETH/USD','SOL/USD','XRP/USD','DOGE/USD'] }
+    }));
   });
   ws.on('message', raw => {
     try {
       const msg = JSON.parse(raw);
-      if (msg.channel === 'ticker' && msg.data) msg.data.forEach(t => { krakenPrices[t.symbol] = t.last; });
+      if (msg.channel === 'ticker' && msg.data) {
+        msg.data.forEach(t => { krakenPrices[t.symbol] = t.last; });
+      }
     } catch(e) {}
   });
   ws.on('close', () => { console.log('[Kraken] Riconnessione...'); setTimeout(connettiKraken, 5000); });
   ws.on('error', err => console.error('[Kraken]', err.message));
 }
 
-
-// DEBUG — mostra mercati raw da Polymarket
-app.get('/debug/polymarket', async function(req, res) {
-  try {
-    const r = await axios.get('https://gamma-api.polymarket.com/markets', {
-      params: { active: true, limit: 50, order: 'volume', ascending: false },
-      timeout: 10000
-    });
-    const markets = r.data || [];
-    const btc = markets.filter(m => {
-      const t = (m.question || m.slug || '').toLowerCase();
-      return t.includes('bitcoin') || t.includes('btc');
-    }).map(m => ({
-      question: m.question,
-      slug: m.slug,
-      endDate: m.endDate || m.end_date_iso || m.endDateIso,
-      outcomePrices: m.outcomePrices,
-      volume: m.volume,
-      active: m.active
-    }));
-    res.json({ total: markets.length, btc_count: btc.length, btc_markets: btc });
-  } catch(e) {
-    res.json({ error: e.message });
+// ── HTTP Routes ───────────────────────────────────────────
+app.get('/health', (req, res) => {
+  const status = {};
+  for (const a of ASSETS) {
+    for (const f of FINESTRE) {
+      status[a.key + '_' + f.key] = !!polyMarkets[f.key][a.key];
+    }
   }
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    kraken: Object.keys(krakenPrices).length,
+    polymarkets: status
+  });
 });
 
-app.get('/health', (req, res) => res.json({
-  status: 'ok', timestamp: new Date().toISOString(),
-  kraken: Object.keys(krakenPrices).length > 0,
-  polymarket5m: !!polyMarkets['5m'].BTC,
-  polymarket15m: !!polyMarkets['15m'].BTC
-}));
 app.get('/prices', (req, res) => res.json({ kraken: krakenPrices, polymarkets: polyMarkets }));
-app.get('/report', function(req, res) {
-  var limit = parseInt(req.query.limit) || 5000;
-  var data = reportData.slice(-limit);
-  var signals = data.filter(function(r) { return r.direzione !== null; });
-  var scores = data.map(function(r) { return Math.abs(r.score); });
-  var avgScore = scores.length ? scores.reduce(function(s,v){return s+v;},0)/scores.length : 0;
-  var maxScore = scores.length ? Math.max.apply(null, scores) : 0;
-  var totalPnl = signals.reduce(function(s,r){return s+(r.pnl1k||0);},0);
+
+app.get('/report', (req, res) => {
+  const limit = parseInt(req.query.limit) || 5000;
+  const data = reportData.slice(-limit);
+  const signals = data.filter(r => r.direzione !== null);
+  const scores = data.map(r => Math.abs(r.score));
+  const avgScore = scores.length ? scores.reduce((s,v) => s+v, 0) / scores.length : 0;
+  const maxScore = scores.length ? Math.max(...scores) : 0;
+  const totalPnl = signals.reduce((s,r) => s + (r.pnl1k||0), 0);
   res.json({
     meta: {
       totalEntries: data.length,
@@ -258,7 +293,6 @@ app.get('/report', function(req, res) {
       avgScore: parseFloat(avgScore.toFixed(4)),
       maxScore: parseFloat(maxScore.toFixed(4)),
       totalPnl1k: parseFloat(totalPnl.toFixed(2)),
-      scoreThreshold: 1.0,
       from: data.length ? data[0].ts : null,
       to: data.length ? data[data.length-1].ts : null
     },
@@ -266,23 +300,26 @@ app.get('/report', function(req, res) {
   });
 });
 
-app.get('/report/csv', function(req, res) {
-  var data = reportData;
-  if (!data.length) { res.send('Nessun dato'); return; }
-  var sep = ',';
-  var headers = ['#','timestamp','finestra','kraken_usd','price_to_beat','distanza_usd','min_rimasti','score','up_cents','down_cents','segnale','pnl_1k_usd','volume'];
-  var rows = data.map(function(r, i) {
-    return [i+1, r.ts, r.finestra, r.krakenPrice, r.priceToBeat||'', r.distanza, r.minRimasti, r.score, r.prezzoUp, r.prezzoDown, r.direzione||'ATTESA', r.pnl1k||'', r.volume].join(sep);
-  });
-  var csv = headers.join(sep) + '\n' + rows.join('\n');
+app.get('/report/csv', (req, res) => {
+  if (!reportData.length) { res.send('Nessun dato'); return; }
+  const headers = ['#','timestamp','asset','finestra','kraken_usd','price_to_beat','distanza_usd','min_rimasti','score','up_cents','down_cents','segnale','pnl_1k_usd'];
+  const rows = reportData.map((r, i) => [
+    i+1, r.ts, r.asset, r.finestra, r.krakenPrice, r.priceToBeat||'',
+    r.distanza, r.minRimasti, r.score, r.prezzoUp, r.prezzoDown,
+    r.direzione||'ATTESA', r.pnl1k||''
+  ].join(','));
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename=arbitrage_report.csv');
-  res.send(csv);
+  res.send(headers.join(',') + '\n' + rows.join('\n'));
 });
 
 app.get('/signals/history', (req, res) => res.json(gapHistory.slice(-200)));
-app.post('/test-alert', async (req, res) => { await sendTelegram('Test alert ok!'); res.json({ ok: true }); });
+app.post('/test-alert', async (req, res) => {
+  await sendTelegram('Test alert ok! Sistema multi-asset attivo: BTC ETH SOL XRP DOGE');
+  res.json({ ok: true });
+});
 
+// ── WebSocket server ──────────────────────────────────────
 const server = app.listen(PORT, () => console.log('[Server] Porta ' + PORT));
 const wss = new WebSocket.Server({ server });
 wss.on('connection', ws => {
@@ -291,9 +328,10 @@ wss.on('connection', ws => {
   ws.on('close', () => console.log('[WS] Disconnesso'));
 });
 
+// ── Avvio ─────────────────────────────────────────────────
 connettiKraken();
 fetchPolymarket();
 setInterval(fetchPolymarket, 5000);
 setInterval(controllaGap, 3000);
-console.log('[Sistema] Backend avviato');
-sendTelegram('Backend Arbitrage Terminal avviato');
+console.log('[Sistema] Backend multi-asset avviato — BTC ETH SOL XRP DOGE');
+sendTelegram('Backend avviato — multi-asset: BTC ETH SOL XRP DOGE');
