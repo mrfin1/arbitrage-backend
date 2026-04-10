@@ -82,8 +82,29 @@ function isOperazioneProfittevole(prezzoContratto, pnlNetto) {
 }
 
 // ── Report ────────────────────────────────────────────────
+// Registra esito dopo scadenza contratto
+async function verificaEsito(entry) {
+  if (!entry.closeAt || !entry.priceToBeat) return;
+  const ora = Date.now();
+  // Verifica solo se il contratto è scaduto da meno di 5 minuti
+  if (ora < entry.closeAt || ora - entry.closeAt > 300000) return;
+  const assetSym = entry.asset + '/USD';
+  const prezzoFinale = krakenPrices[assetSym];
+  if (!prezzoFinale) return;
+  const sopra = prezzoFinale >= entry.priceToBeat;
+  entry.esito = sopra ? 'UP_WINS' : 'DOWN_WINS';
+  entry.prezzoFinale = prezzoFinale;
+  const direzCorretta = entry.direzione === 'UP' ? sopra : !sopra;
+  entry.direzCorretta = direzCorretta;
+  if (entry.direzione) {
+    console.log('[Esito] ' + entry.asset + '/' + entry.finestra +
+      ' → ' + entry.esito + ' | Direzione ' + entry.direzione +
+      ' era ' + (direzCorretta ? 'CORRETTA ✓' : 'ERRATA ✗'));
+  }
+}
+
 function registraReport(asset, finestra, krakenPrice, polyMkt, score, direzione, pnlNetto) {
-  reportData.push({
+  const entry = {
     ts: new Date().toISOString(),
     asset: asset,
     finestra: finestra,
@@ -101,8 +122,14 @@ function registraReport(asset, finestra, krakenPrice, polyMkt, score, direzione,
       pnlNetto
     ),
     pnl1k: pnlNetto ? parseFloat((pnlNetto / 100 * 1000).toFixed(2)) : null,
-    volume: polyMkt.volume || 0
-  });
+    volume: polyMkt.volume || 0,
+    closeAt: polyMkt.closeAt || null,
+    esito: null,
+    prezzoFinale: null,
+    direzCorretta: null
+  };
+  reportData.push(entry);
+  if (reportData.length > REPORT_MAX) reportData.shift();
   if (reportData.length > REPORT_MAX) reportData.shift();
 }
 
@@ -113,21 +140,24 @@ async function fetchPolymarket() {
   for (const asset of ASSETS) {
     for (const fin of FINESTRE) {
       const interval = fin.interval;
-      const ts_curr = nowSec - (nowSec % interval);
-      const slugsToTry = [
-        { slug: asset.prefix + '-' + fin.key + '-' + (ts_curr - interval), closeAt: ts_curr },
-        { slug: asset.prefix + '-' + fin.key + '-' + ts_curr,              closeAt: ts_curr + interval },
-        { slug: asset.prefix + '-' + fin.key + '-' + (ts_curr + interval), closeAt: ts_curr + interval * 2 }
-      ];
 
-      for (const item of slugsToTry) {
-        const minRimasti = (item.closeAt - nowSec) / 60;
-        if (minRimasti < 2 || minRimasti > 25) continue;
+      // Cerca contratti in TUTTE le fasi della vita:
+      // - da 5 intervalli fa (già quasi scaduti) fino a 2 intervalli futuri
+      const tsBase = nowSec - (nowSec % interval);
+      const candidati = [];
+      for (let offset = -4; offset <= 2; offset++) {
+        const ts = tsBase + offset * interval;
+        const closeAt = ts + interval;
+        const minRimasti = (closeAt - nowSec) / 60;
+        if (minRimasti < 0.2 || minRimasti > 30) continue;
+        candidati.push({ slug: asset.prefix + '-' + fin.key + '-' + ts, closeAt, minRimasti });
+      }
 
-        // Skip se abbiamo già un mercato valido per questo asset/finestra
-        const existing = polyMarkets[fin.key][asset.key];
-        if (existing && existing.minRimasti >= minRimasti && existing.minRimasti > 2) continue;
+      // Ordina per minRimasti crescente — vogliamo prima quelli che scadono prima
+      candidati.sort((a, b) => a.minRimasti - b.minRimasti);
 
+      let trovato = false;
+      for (const item of candidati) {
         try {
           const r = await axios.get('https://gamma-api.polymarket.com/markets', {
             params: { slug: item.slug }, timeout: 5000
@@ -146,29 +176,49 @@ async function fetchPolymarket() {
             ? parseFloat(m.startPrice)
             : (krakenPrices[asset.krakenSym] || null);
 
-          polyMarkets[fin.key][asset.key] = {
-            question:    m.question || item.slug,
-            slug:        item.slug,
-            prezzoUp:    parseFloat((upPrice * 100).toFixed(1)),
-            prezzoDown:  parseFloat((downPrice * 100).toFixed(1)),
-            priceToBeat: priceToBeat,
-            minRimasti:  parseFloat(minRimasti.toFixed(2)),
-            volume:      m.volume24hr || m.volume || 0,
-            aggiornato:  new Date().toISOString()
-          };
+          // Aggiorna solo se è un contratto più fresco o diverso
+          const existing = polyMarkets[fin.key][asset.key];
+          const isNuovoContratto = !existing || existing.slug !== item.slug;
+          const isMigliore = !existing || item.minRimasti < existing.minRimasti;
 
-          console.log('[Poly ' + asset.key + '/' + fin.key + '] ' +
-            polyMarkets[fin.key][asset.key].prezzoUp + 'c/' +
-            polyMarkets[fin.key][asset.key].prezzoDown + 'c | ' +
-            minRimasti.toFixed(1) + 'min');
-          break;
+          if (isNuovoContratto || isMigliore) {
+            polyMarkets[fin.key][asset.key] = {
+              question:    m.question || item.slug,
+              slug:        item.slug,
+              prezzoUp:    parseFloat((upPrice * 100).toFixed(1)),
+              prezzoDown:  parseFloat((downPrice * 100).toFixed(1)),
+              priceToBeat: priceToBeat,
+              minRimasti:  parseFloat(item.minRimasti.toFixed(2)),
+              closeAt:     item.closeAt * 1000, // timestamp ms per calcoli frontend
+              volume:      m.volume24hr || m.volume || 0,
+              aggiornato:  new Date().toISOString()
+            };
+            if (isNuovoContratto) {
+              console.log('[Poly ' + asset.key + '/' + fin.key + '] NUOVO: ' + item.slug +
+                ' UP:' + polyMarkets[fin.key][asset.key].prezzoUp + 'c' +
+                ' ' + item.minRimasti.toFixed(1) + 'min');
+            }
+            trovato = true;
+            break;
+          }
         } catch(e) { /* slug non trovato */ }
+      }
+
+      if (!trovato && polyMarkets[fin.key][asset.key]) {
+        // Aggiorna minRimasti in real-time anche senza nuovo fetch
+        const m = polyMarkets[fin.key][asset.key];
+        if (m.closeAt) {
+          m.minRimasti = parseFloat(((m.closeAt - Date.now()) / 60000).toFixed(2));
+          if (m.minRimasti < 0) {
+            polyMarkets[fin.key][asset.key] = null;
+            console.log('[Poly ' + asset.key + '/' + fin.key + '] Scaduto — reset');
+          }
+        }
       }
     }
   }
 }
 
-// ── Controlla segnali ─────────────────────────────────────
 async function controllaGap() {
   // Resetta mercati scaduti
   for (const fin of FINESTRE) {
@@ -234,6 +284,14 @@ async function controllaGap() {
     }
   }
 
+  // Verifica esiti per contratti appena scaduti
+  const ora = Date.now();
+  reportData.slice(-100).forEach(entry => {
+    if (!entry.esito && entry.closeAt && ora >= entry.closeAt) {
+      verificaEsito(entry);
+    }
+  });
+
   broadcast({ type: 'signals', data: segnali });
   broadcast({ type: 'polymarkets', data: polyMarkets });
 }
@@ -294,7 +352,16 @@ app.get('/report', (req, res) => {
       maxScore: parseFloat(maxScore.toFixed(4)),
       totalPnl1k: parseFloat(totalPnl.toFixed(2)),
       from: data.length ? data[0].ts : null,
-      to: data.length ? data[data.length-1].ts : null
+      to: data.length ? data[data.length-1].ts : null,
+      esiti: {
+        verificati: data.filter(r => r.esito).length,
+        corretti:   data.filter(r => r.direzCorretta === true).length,
+        errati:     data.filter(r => r.direzCorretta === false).length,
+        winRate:    (() => {
+          const v = data.filter(r => r.esito && r.direzione);
+          return v.length ? parseFloat((v.filter(r => r.direzCorretta).length / v.length * 100).toFixed(1)) : null;
+        })()
+      }
     },
     log: data
   });
@@ -302,11 +369,12 @@ app.get('/report', (req, res) => {
 
 app.get('/report/csv', (req, res) => {
   if (!reportData.length) { res.send('Nessun dato'); return; }
-  const headers = ['#','timestamp','asset','finestra','kraken_usd','price_to_beat','distanza_usd','min_rimasti','score','up_cents','down_cents','segnale','pnl_1k_usd'];
+  const headers = ['#','timestamp','asset','finestra','kraken_usd','price_to_beat','distanza_usd','min_rimasti','score','up_cents','down_cents','segnale','pnl_1k_usd','esito','prezzo_finale','direz_corretta'];
   const rows = reportData.map((r, i) => [
     i+1, r.ts, r.asset, r.finestra, r.krakenPrice, r.priceToBeat||'',
     r.distanza, r.minRimasti, r.score, r.prezzoUp, r.prezzoDown,
-    r.direzione||'ATTESA', r.pnl1k||''
+    r.direzione||'ATTESA', r.pnl1k||'',
+    r.esito||'', r.prezzoFinale||'', r.direzCorretta!==null?r.direzCorretta:''
   ].join(','));
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename=arbitrage_report.csv');
