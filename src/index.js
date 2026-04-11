@@ -15,8 +15,8 @@ const PORT = process.env.PORT || 3001;
 // ── Stato ────────────────────────────────────────────────
 let krakenPrices = {};
 let polyMarkets = {
-  '5m':  { BTC: null, ETH: null, SOL: null, XRP: null, DOGE: null },
-  '15m': { BTC: null, ETH: null, SOL: null, XRP: null, DOGE: null }
+  '5m':  { BTC: null },
+  '15m': { BTC: null }
 };
 let connectedClients = [];
 let gapHistory = [];
@@ -26,11 +26,7 @@ let lastAlertTime = {};
 const REPORT_MAX = 10000;
 
 const ASSETS = [
-  { key: 'BTC',  prefix: 'btc-updown',  krakenSym: 'BTC/USD',  volPerMin: 30   },
-  { key: 'ETH',  prefix: 'eth-updown',  krakenSym: 'ETH/USD',  volPerMin: 2    },
-  { key: 'SOL',  prefix: 'sol-updown',  krakenSym: 'SOL/USD',  volPerMin: 0.5  },
-  { key: 'XRP',  prefix: 'xrp-updown',  krakenSym: 'XRP/USD',  volPerMin: 0.05 },
-  { key: 'DOGE', prefix: 'doge-updown', krakenSym: 'DOGE/USD', volPerMin: 0.01 }
+  { key: 'BTC', prefix: 'btc-updown', krakenSym: 'BTC/USD', volPerMin: 30 }
 ];
 
 const FINESTRE = [
@@ -303,7 +299,7 @@ function connettiKraken() {
     console.log('[Kraken] Connesso');
     ws.send(JSON.stringify({
       method: 'subscribe',
-      params: { channel: 'ticker', symbol: ['BTC/USD','ETH/USD','SOL/USD','XRP/USD','DOGE/USD'] }
+      params: { channel: 'ticker', symbol: ['BTC/USD'] }
     }));
   });
   ws.on('message', raw => {
@@ -320,17 +316,15 @@ function connettiKraken() {
 
 // ── HTTP Routes ───────────────────────────────────────────
 app.get('/health', (req, res) => {
-  const status = {};
-  for (const a of ASSETS) {
-    for (const f of FINESTRE) {
-      status[a.key + '_' + f.key] = !!polyMarkets[f.key][a.key];
-    }
-  }
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    kraken: Object.keys(krakenPrices).length,
-    polymarkets: status
+    kraken: !!krakenPrices['BTC/USD'],
+    btcPrice: krakenPrices['BTC/USD'] || null,
+    polymarket5m:  !!polyMarkets['5m'].BTC,
+    polymarket15m: !!polyMarkets['15m'].BTC,
+    min5m:  polyMarkets['5m'].BTC  ? polyMarkets['5m'].BTC.minRimasti  : null,
+    min15m: polyMarkets['15m'].BTC ? polyMarkets['15m'].BTC.minRimasti : null
   });
 });
 
