@@ -238,6 +238,14 @@ async function fetchPolymarket() {
       const interval = fin.interval;
       const tsBase = nowSec - (nowSec % interval);
       const candidati = [];
+
+      // Per 1h: prova anche prefisso alternativo (Binance-based markets)
+      const prefixes = [asset.prefix];
+      if (fin.key === '1h') {
+        // alcuni mercati 1h usano slug tipo 'bitcoin-up-or-down-hourly-TIMESTAMP'
+        // proviamo anche senza timestamp (ricerca per keyword sotto)
+      }
+
       for (let offset = -4; offset <= 2; offset++) {
         const ts      = tsBase + offset * interval;
         const closeAt = ts + interval;
@@ -301,6 +309,46 @@ async function fetchPolymarket() {
             break;
           }
         } catch(e) { /* slug non trovato */ }
+      }
+
+      // Fallback 1h: cerca per keyword se slug deterministico non trovato
+      if (!trovato && fin.key === '1h') {
+        try {
+          const r = await axios.get('https://gamma-api.polymarket.com/markets', {
+            params: { active: true, limit: 20, order: 'end_date_min', ascending: true },
+            timeout: 6000
+          });
+          const markets = r.data || [];
+          const btc1h = markets.filter(m => {
+            const t = (m.question || m.slug || '').toLowerCase();
+            return (t.includes('bitcoin') || t.includes('btc')) &&
+                   (t.includes('hour') || t.includes('1h') || t.includes('1-hour') || t.includes('hourly')) &&
+                   m.outcomePrices && !m.closed;
+          }).map(m => {
+            const endStr = m.endDate || m.endDateIso || m.end_date_iso;
+            const minR = endStr ? (new Date(endStr) - Date.now()) / 60000 : null;
+            return Object.assign({}, m, { minRimasti: minR });
+          }).filter(m => m.minRimasti && m.minRimasti > 0.5 && m.minRimasti < 120)
+            .sort((a,b) => a.minRimasti - b.minRimasti);
+
+          if (btc1h.length) {
+            const m = btc1h[0];
+            const prices = typeof m.outcomePrices === 'string' ? JSON.parse(m.outcomePrices) : m.outcomePrices;
+            const priceToBeat = m.startPrice ? parseFloat(m.startPrice) : (krakenPrices[asset.krakenSym] || null);
+            polyMarkets['1h'][asset.key] = {
+              question: m.question || m.slug,
+              slug: m.slug,
+              prezzoUp:   parseFloat((parseFloat(prices[0]) * 100).toFixed(1)),
+              prezzoDown: parseFloat((parseFloat(prices[1]) * 100).toFixed(1)),
+              priceToBeat, minRimasti: parseFloat(m.minRimasti.toFixed(2)),
+              closeAt: m.endDate ? new Date(m.endDate).getTime() : null,
+              volume: m.volume24hr || m.volume || 0,
+              aggiornato: new Date().toISOString()
+            };
+            trovato = true;
+            console.log('[Poly 1h] Trovato via keyword: ' + m.question + ' ' + m.minRimasti.toFixed(1) + 'min');
+          }
+        } catch(e) { /* fallback fallito */ }
       }
 
       if (!trovato && polyMarkets[fin.key][asset.key]) {
