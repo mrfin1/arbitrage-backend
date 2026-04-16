@@ -230,22 +230,25 @@ async function verificaEsito(entry) {
 const distanzePrecedenti = {};
 
 // ── Fetch Polymarket con rilevamento cambio contratto ──────
-// Genera slug per mercato 1h: bitcoin-up-or-down-MONTH-DAY-YEAR-HOURam/pm-et
+// Genera slug per mercato 1h: bitcoin-up-or-down-april-16-2026-6pm-et
+// offsetHours: 0 = ora corrente ET, 1 = prossima ora, -1 = ora precedente
 function generate1hSlug(offsetHours) {
-  // Ora ET = UTC - 4 (EDT) o UTC - 5 (EST)
   const now = new Date();
-  const etOffset = -4; // EDT (aprile = ora legale)
-  const et = new Date(now.getTime() + (etOffset * 60 * 60 * 1000) + (offsetHours * 60 * 60 * 1000));
+  // EDT = UTC-4 (marzo-novembre), EST = UTC-5 (resto)
+  // Aprile → EDT → UTC-4
+  const etOffset = -4;
+  const et = new Date(now.getTime() + (etOffset + offsetHours) * 3600000);
   
-  const months = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+  const months = ['january','february','march','april','may','june',
+                  'july','august','september','october','november','december'];
   const month = months[et.getUTCMonth()];
   const day   = et.getUTCDate();
   const year  = et.getUTCFullYear();
-  let   hour  = et.getUTCHours();
+  let   hour  = et.getUTCHours(); // ora ET (già sottratto offset)
   const ampm  = hour >= 12 ? 'pm' : 'am';
-  if (hour > 12) hour -= 12;
-  if (hour === 0) hour = 12;
-  
+  if (hour === 0)       hour = 12;
+  else if (hour > 12)   hour = hour - 12;
+  // es: UTC 22:32 → ET 18:32 → 6pm → bitcoin-up-or-down-april-16-2026-6pm-et
   return 'bitcoin-up-or-down-' + month + '-' + day + '-' + year + '-' + hour + ampm + '-et';
 }
 
@@ -271,6 +274,9 @@ async function fetchPolymarket() {
       let trovato = false;
       for (const item of candidati) {
         try {
+          if (fin.slugType === 'hourly') {
+            console.log('[1h] Provo slug:', item.slug);
+          }
           const r = await axios.get('https://gamma-api.polymarket.com/markets', {
             params: { slug: item.slug }, timeout: 5000
           });
