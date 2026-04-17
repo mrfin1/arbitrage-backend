@@ -261,13 +261,27 @@ async function fetchPolymarket() {
       const tsBase = nowSec - (nowSec % interval);
       const candidati = [];
 
-      for (let offset = -4; offset <= 2; offset++) {
-        const ts      = tsBase + offset * interval;
-        const closeAt = ts + interval;
-        const minR    = (closeAt - nowSec) / 60;
-        const maxMinR = fin.interval <= 900 ? 30 : fin.interval <= 3600 ? 120 : 480;
-        if (minR < 0.5 || minR > maxMinR) continue;
-        candidati.push({ slug: asset.prefix + '-' + fin.key + '-' + ts, closeAt, minRimasti: minR });
+      if (fin.slugType === 'hourly') {
+        // Mercato 1h usa slug testuale ET: bitcoin-up-or-down-april-17-2026-5pm-et
+        for (let offset = -2; offset <= 2; offset++) {
+          const slug = generate1hSlug(offset);
+          const etNowSec = nowSec - (4 * 3600);
+          const etHourStart = (Math.floor(etNowSec / 3600) + offset) * 3600;
+          const closeAtEt = etHourStart + 3600;
+          const closeAt = closeAtEt + (4 * 3600);
+          const minR = (closeAt - nowSec) / 60;
+          if (minR < 0.5 || minR > 120) continue;
+          candidati.push({ slug, closeAt, minRimasti: minR });
+        }
+      } else {
+        for (let offset = -4; offset <= 2; offset++) {
+          const ts      = tsBase + offset * interval;
+          const closeAt = ts + interval;
+          const minR    = (closeAt - nowSec) / 60;
+          const maxMinR = fin.interval <= 900 ? 30 : fin.interval <= 3600 ? 120 : 480;
+          if (minR < 0.5 || minR > maxMinR) continue;
+          candidati.push({ slug: asset.prefix + '-' + fin.key + '-' + ts, closeAt, minRimasti: minR });
+        }
       }
       candidati.sort((a, b) => a.minRimasti - b.minRimasti);
 
