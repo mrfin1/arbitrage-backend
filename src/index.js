@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3001;
 
 // ── Configurazione ────────────────────────────────────────
 const ASSETS = [
-  { key: 'BTC', prefix: 'btc-updown', krakenSym: 'BTC/USD', volPerMin: 30 }
+  { key: 'BTC', prefix: 'btc-updown', krakenSym: 'BTC/USD', volPerMin: 15 }
 ];
 const FINESTRE = [
   { key: '5m',  interval: 300   },
