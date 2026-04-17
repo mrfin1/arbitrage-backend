@@ -574,6 +574,11 @@ app.post('/execution/test', async (req, res) => {
   res.json(result);
 });
 
+app.post('/report/send', async (req, res) => {
+  await inviaCsvTelegram('📤 Invio manuale richiesto');
+  res.json({ ok: true, righe: reportData.length });
+});
+
 app.post('/test-alert', async (req, res) => {
   await sendTelegram('🧪 <b>Test sistema</b>\n\nTutti i moduli operativi:\n✅ Kraken WebSocket\n✅ Polymarket CLOB\n✅ Chainlink price\n✅ Momentum tracking\n✅ Verifica esiti\n✅ Alert Telegram\n✅ Execution engine (paper)');
   res.json({ ok: true });
@@ -588,6 +593,81 @@ wss.on('connection', ws => {
   ws.on('close', () => {});
 });
 
+// ── Invio CSV automatico su Telegram ─────────────────────
+// Invia ogni ora — così se Railway si riavvia i dati sono già salvati su Telegram
+async function inviaCsvTelegram(motivo) {
+  try {
+    if (!reportData.length) return;
+
+    // Genera CSV completo
+    const headers = ['#','timestamp','asset','finestra','kraken_usd','chainlink_usd',
+      'price_to_beat','distanza_usd','min_rimasti','score','momentum',
+      'up_cents','down_cents','volume','segnale','pnl_1k_usd',
+      'esito','prezzo_finale','direz_corretta'].join(',');
+    const rows = reportData.map((r, i) => [
+      i+1, r.ts, r.asset, r.finestra,
+      r.krakenPrice, r.chainlinkPrice||'', r.priceToBeat||'',
+      r.distanza, r.minRimasti, r.score, r.momentum||'',
+      r.prezzoUp, r.prezzoDown, r.volume,
+      r.direzione||'ATTESA', r.pnl1k||'',
+      r.esito||'', r.prezzoFinale||'',
+      r.direzCorretta!==null&&r.direzCorretta!==undefined?r.direzCorretta:''
+    ].join(','));
+    const csv = headers + '\n' + rows.join('\n');
+
+    // Statistiche rapide
+    const segnali    = reportData.filter(r => r.direzione);
+    const verificati = reportData.filter(r => r.esito && r.direzione);
+    const corretti   = verificati.filter(r => r.direzCorretta === true);
+    const winRate    = verificati.length ? (corretti.length/verificati.length*100).toFixed(1) : 'N/A';
+    const scores     = reportData.map(r => Math.abs(r.score));
+    const maxScore   = scores.length ? Math.max(...scores).toFixed(3) : '—';
+    const totPnl     = segnali.reduce((s,r) => s+(r.pnl1k||0), 0);
+    const da         = reportData[0]?.ts?.slice(11,19) || '—';
+    const a          = reportData[reportData.length-1]?.ts?.slice(11,19) || '—';
+
+    const filename = 'report_' + new Date().toISOString().slice(0,16).replace('T','_').replace(':','-') + '.csv';
+    const caption = (motivo||'⏱ Backup orario') + '\n\n' +
+      '📊 <b>' + reportData.length + ' righe</b> | ' + da + ' → ' + a + ' UTC\n' +
+      '🎯 Segnali: ' + segnali.length + ' | WR: <b>' + winRate + '%</b>\n' +
+      '📈 Score max: ' + maxScore + '\n' +
+      '💰 P&L stimato: $' + totPnl.toFixed(2);
+
+    // Multipart form-data built-in (Node 18+)
+    const boundary = '----FormBoundary' + Date.now();
+    const CRLF = '\r\n';
+    const parts = [
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="chat_id"' + CRLF + CRLF +
+      TELEGRAM_CHAT_ID,
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="parse_mode"' + CRLF + CRLF +
+      'HTML',
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="caption"' + CRLF + CRLF +
+      caption,
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="document"; filename="' + filename + '"' + CRLF +
+      'Content-Type: text/csv' + CRLF + CRLF +
+      csv,
+      '--' + boundary + '--'
+    ].join(CRLF);
+
+    await axios.post(
+      'https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendDocument',
+      parts,
+      {
+        headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary },
+        timeout: 30000,
+        maxBodyLength: 50 * 1024 * 1024
+      }
+    );
+    console.log('[Telegram] CSV inviato: ' + filename + ' (' + reportData.length + ' righe)');
+  } catch(err) {
+    console.error('[Telegram CSV]', err.message);
+  }
+}
+
 // ── Avvio ──────────────────────────────────────────────────
 connettiKraken();
 fetchPolymarket();
@@ -596,6 +676,7 @@ fetchChainlinkPrice();
 setInterval(fetchPolymarket,    5000);
 setInterval(controllaGap,       3000);
 setInterval(fetchChainlinkPrice, 30000);
+setInterval(()=>inviaCsvTelegram('⏱ Backup orario automatico'), 3600000); // ogni ora
 
 console.log('[Sistema] Arbitrage Terminal v4.1 — BTC only, tutti i controlli attivi');
 sendTelegram('🚀 <b>Arbitrage Terminal v4.1</b> avviato\n\n✅ Momentum tracking\n✅ Controllo liquidità\n✅ Verifica Chainlink\n✅ Notifica esiti\n✅ Cambio contratto\n✅ Limite esposizione');
