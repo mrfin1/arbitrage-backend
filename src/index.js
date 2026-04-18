@@ -41,7 +41,7 @@ let gapHistory      = [];
 let reportData      = [];
 let lastAlertTime   = {};
 let lastContractKey = { '5m': null, '15m': null, '1h': null, '4h': null };
-const REPORT_MAX    = 10000;
+const REPORT_MAX    = 50000;
 
 // ── Telegram ──────────────────────────────────────────────
 async function sendTelegram(message) {
