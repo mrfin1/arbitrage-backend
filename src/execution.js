@@ -123,7 +123,20 @@ async function getSaldoWallet() {
   if (!wallet) return null;
   try {
     const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-    const POLYGON_RPC  = 'https://polygon-rpc.com';
+    // RPC Polygon — usa variabile d'ambiente o fallback pubblico
+    const POLYGON_RPCS = [
+      process.env.POLYGON_RPC_URL,
+      'https://polygon.drpc.org',
+      'https://1rpc.io/matic',
+      'https://polygon-bor-rpc.publicnode.com'
+    ].filter(Boolean);
+    let hex = null;
+    for (const rpc of POLYGON_RPCS) {
+      try {
+        const r2 = await axios.post(rpc, payload, { timeout: 6000 });
+        if (r2.data?.result && r2.data.result !== '0x') { hex = r2.data.result; break; }
+      } catch(e2) { continue; }
+    }
     // ABI-encoded: balanceOf(address)
     const addr    = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
     const data    = '0x70a08231000000000000000000000000' + addr;
@@ -131,9 +144,7 @@ async function getSaldoWallet() {
       jsonrpc: '2.0', id: 1, method: 'eth_call',
       params: [{ to: USDC_POLYGON, data }, 'latest']
     };
-    const r = await axios.post(POLYGON_RPC, payload, { timeout: 8000 });
-    const hex = r.data?.result;
-    if (!hex || hex === '0x') return null;
+    if (!hex) return null;
     // USDC ha 6 decimali
     const saldo = parseInt(hex, 16) / 1e6;
     if (saldo >= 0) {
