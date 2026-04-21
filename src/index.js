@@ -12,6 +12,12 @@ const TELEGRAM_TOKEN  = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const PORT = process.env.PORT || 3001;
 
+// ── Filtro orario — dati da 59h test reale ─────────────────
+const ORE_PREMIUM = new Set([0,2,3,5,6,7,8,9,11,12,14,15,17,19,20,22,23]);
+const ORE_DEBOLI  = new Set([13,16,18]);
+let FILTRO_ORA_ATTIVO = process.env.FILTRO_ORA !== 'false';
+
+
 // ── Configurazione ────────────────────────────────────────
 const ASSETS = [
   { key: 'BTC', prefix: 'btc-updown', krakenSym: 'BTC/USD', volPerMin: 15 }
