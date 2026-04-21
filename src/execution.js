@@ -135,6 +135,13 @@ async function getSaldoWallet() {
   if (!wallet) return null;
   try {
     const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+    // ABI-encoded: balanceOf(address) — PRIMA del loop
+    const addr    = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
+    const data    = '0x70a08231000000000000000000000000' + addr;
+    const payload = {
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: USDC_POLYGON, data }, 'latest']
+    };
     // RPC Polygon — usa variabile d'ambiente o fallback pubblico
     const POLYGON_RPCS = [
       process.env.POLYGON_RPC_URL,
@@ -155,13 +162,6 @@ async function getSaldoWallet() {
         continue;
       }
     }
-    // ABI-encoded: balanceOf(address)
-    const addr    = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
-    const data    = '0x70a08231000000000000000000000000' + addr;
-    const payload = {
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to: USDC_POLYGON, data }, 'latest']
-    };
     if (!hex) return null;
     // USDC ha 6 decimali
     const saldo = parseInt(hex, 16) / 1e6;
