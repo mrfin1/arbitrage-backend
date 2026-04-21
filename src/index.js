@@ -17,7 +17,6 @@ const ASSETS = [
   { key: 'BTC', prefix: 'btc-updown', krakenSym: 'BTC/USD', volPerMin: 15 }
 ];
 const FINESTRE = [
-  { key: '5m',  interval: 300   },
   { key: '15m', interval: 900   },
   { key: '1h',  interval: 3600, slugType: 'hourly' },
   { key: '4h',  interval: 14400 }
@@ -35,12 +34,12 @@ const CHAINLINK_URL    = 'https://data.chain.link/streams/btc-usd';
 let krakenPrices    = {};
 let chainlinkPrice  = null;
 let chainlinkTs     = 0;
-let polyMarkets     = { '5m': { BTC: null }, '15m': { BTC: null }, '1h': { BTC: null }, '4h': { BTC: null } };
+let polyMarkets     = { '15m': { BTC: null }, '1h': { BTC: null }, '4h': { BTC: null } };
 let connectedClients = [];
 let gapHistory      = [];
 let reportData      = [];
 let lastAlertTime   = {};
-let lastContractKey = { '5m': null, '15m': null, '1h': null, '4h': null };
+let lastContractKey = { '15m': null, '1h': null, '4h': null };
 const REPORT_MAX    = 50000;
 
 // ── Telegram ──────────────────────────────────────────────
@@ -359,6 +358,14 @@ async function fetchPolymarket() {
 
 // ── Controlla segnali ──────────────────────────────────────
 async function controllaGap() {
+  const oraUTC = new Date().getUTCHours();
+
+  // Filtro orario — skip se ora debole
+  if (FILTRO_ORA_ATTIVO && ORE_DEBOLI.has(oraUTC)) {
+    // Non generare segnali nelle ore deboli ma continua a raccogliere dati
+    broadcast({ type: 'oraStatus', data: { ora: oraUTC, status: 'DEBOLE', wr: '<60%', filtroAttivo: true } });
+  }
+
   // Verifica esiti contratti scaduti
   const ora = Date.now();
   reportData.slice(-200).forEach(entry => {
@@ -397,6 +404,10 @@ async function controllaGap() {
       const volumeOk = !direzione || (m.volume || 0) >= MIN_VOLUME;
 
       const profittevole = isOperazioneProfittevole(prezzoC, pnlNetto, m.volume);
+      const oraPremium  = ORE_PREMIUM.has(oraUTC);
+      const oraDebole   = ORE_DEBOLI.has(oraUTC);
+      // Blocca esecuzione nelle ore deboli (solo alert soppressi, dati registrati)
+      const eseguibile  = profittevole && (!FILTRO_ORA_ATTIVO || !oraDebole);
 
       const segnale = {
         asset: asset.key, finestra: fin.key,
@@ -406,6 +417,7 @@ async function controllaGap() {
         momentum, minRimasti: m.minRimasti,
         score: parseFloat(score.toFixed(4)),
         direzione, prezzoContratto: prezzoC, pnlNetto, profittevole,
+        eseguibile, oraPremium, oraDebole,
         volumeOk, volume: m.volume || 0,
         question: m.question,
         timestamp: new Date().toISOString()
@@ -418,7 +430,7 @@ async function controllaGap() {
       const entry = registraReport(asset.key, fin.key, assetPrice, m, score, direzione, pnlNetto, momentum);
 
       // Alert solo se profittevole + volume ok
-      if (profittevole && direzione && volumeOk && puoMandareAlert(asset.key + '-' + fin.key + '-' + direzione)) {
+      if (eseguibile && direzione && volumeOk && puoMandareAlert(asset.key + '-' + fin.key + '-' + direzione)) {
         const emoji = direzione === 'UP' ? '🟢' : '🔴';
         const momentumStr = momentum !== null
           ? '\n📊 Momentum: <b>' + (momentum > 0 ? '+' : '') + momentum.toFixed(2) + '$ (' + (
@@ -452,6 +464,10 @@ async function controllaGap() {
   broadcast({ type: 'signals',    data: segnali });
   broadcast({ type: 'polymarkets', data: polyMarkets });
   broadcast({ type: 'chainlink',  data: { price: chainlinkPrice, ts: chainlinkTs } });
+  // Broadcast posizioni aperte e grafici
+  const execution = require('./execution');
+  const dashData = execution.getDashboardData();
+  broadcast({ type: 'execution', data: dashData });
 }
 
 // ── Kraken WebSocket ───────────────────────────────────────
@@ -477,20 +493,22 @@ function connettiKraken() {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
+    filtroOra: {
+      attivo: FILTRO_ORA_ATTIVO,
+      oraUTC: new Date().getUTCHours(),
+      status: ORE_PREMIUM.has(new Date().getUTCHours())?'PREMIUM★':ORE_DEBOLI.has(new Date().getUTCHours())?'DEBOLE✗':'NEUTRA'
+    },
     timestamp: new Date().toISOString(),
     kraken: !!krakenPrices['BTC/USD'],
     btcKraken: krakenPrices['BTC/USD'] || null,
     btcChainlink: chainlinkPrice || null,
     chainlinkAge: chainlinkTs ? Math.round((Date.now() - chainlinkTs) / 1000) + 's' : null,
-    polymarket5m:  !!polyMarkets['5m'].BTC,
     polymarket15m: !!polyMarkets['15m'].BTC,
     polymarket1h:  !!polyMarkets['1h'].BTC,
     polymarket4h:  !!polyMarkets['4h'].BTC,
-    min5m:  polyMarkets['5m'].BTC  ? polyMarkets['5m'].BTC.minRimasti  : null,
     min15m: polyMarkets['15m'].BTC ? polyMarkets['15m'].BTC.minRimasti : null,
     min1h:  polyMarkets['1h'].BTC  ? polyMarkets['1h'].BTC.minRimasti  : null,
     min4h:  polyMarkets['4h'].BTC  ? polyMarkets['4h'].BTC.minRimasti  : null,
-    vol5m:  polyMarkets['5m'].BTC  ? polyMarkets['5m'].BTC.volume      : null,
     vol15m: polyMarkets['15m'].BTC ? polyMarkets['15m'].BTC.volume     : null,
     vol1h:  polyMarkets['1h'].BTC  ? polyMarkets['1h'].BTC.volume      : null,
     vol4h:  polyMarkets['4h'].BTC  ? polyMarkets['4h'].BTC.volume      : null
@@ -563,6 +581,11 @@ app.get('/execution/status', (req, res) => {
   res.json(execution.getStato());
 });
 
+app.get('/execution/dashboard', (req, res) => {
+  const execution = require('./execution');
+  res.json(execution.getDashboardData());
+});
+
 app.post('/execution/test', async (req, res) => {
   const execution = require('./execution');
   const segnaleTest = {
@@ -572,6 +595,28 @@ app.post('/execution/test', async (req, res) => {
   };
   const result = await execution.piazzaOrdine(segnaleTest);
   res.json(result);
+});
+
+app.post('/filtro-ora/toggle', (req, res) => {
+  FILTRO_ORA_ATTIVO = !FILTRO_ORA_ATTIVO;
+  const msg = FILTRO_ORA_ATTIVO ? '✅ Filtro orario ATTIVATO' : '⏸ Filtro orario DISATTIVATO — tutte le ore attive';
+  console.log('[Filtro ora]', msg);
+  const sendTelegramFn = async () => {
+    try { await require('axios').post('https://api.telegram.org/bot' + process.env.TELEGRAM_TOKEN + '/sendMessage', { chat_id: process.env.TELEGRAM_CHAT_ID, text: msg, parse_mode: 'HTML' }); } catch(e) {}
+  };
+  sendTelegramFn();
+  res.json({ filtroAttivo: FILTRO_ORA_ATTIVO, messaggio: msg });
+});
+
+app.get('/filtro-ora', (req, res) => {
+  const oraUTC = new Date().getUTCHours();
+  res.json({
+    filtroAttivo: FILTRO_ORA_ATTIVO,
+    oraAttuale: oraUTC,
+    status: ORE_PREMIUM.has(oraUTC)?'PREMIUM':ORE_DEBOLI.has(oraUTC)?'DEBOLE':'NEUTRA',
+    orePremium: [...ORE_PREMIUM].sort((a,b)=>a-b),
+    oreDeboli:  [...ORE_DEBOLI].sort((a,b)=>a-b),
+  });
 });
 
 app.post('/report/send', async (req, res) => {
