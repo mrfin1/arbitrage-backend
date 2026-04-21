@@ -49,6 +49,18 @@ function resetIfNewDay() {
   }
 }
 
+// Leggi saldo subito all'avvio e ogni 5 minuti
+async function avviaLetturaSaldo() {
+  const saldo = await getSaldoWallet();
+  if (saldo !== null) {
+    console.log(`[Execution] Saldo iniziale: $${saldo.toFixed(2)} USDC`);
+  } else {
+    console.log('[Execution] Saldo non disponibile — uso default $' + walletBase);
+  }
+}
+setTimeout(avviaLetturaSaldo, 3000); // dopo 3 secondi dall'avvio
+setInterval(avviaLetturaSaldo, 5 * 60 * 1000); // ogni 5 minuti
+
 // ── Wallet ethers ─────────────────────────────────────────
 function getWallet() {
   if (!process.env.WALLET_PRIVATE_KEY) return null;
@@ -490,8 +502,8 @@ function getStato() {
     tradeSizeMax:      TRADE_SIZE_MAX,
     stopLossPct:       MAX_DAILY_LOSS_PCT * 100 + '%',
     maxEsposizionePct: MAX_EXPOSURE_PCT * 100 + '%',
-    walletStimato:     parseFloat((walletBase + dailyStats.pnl).toFixed(2)),
-    prossimaTrade:     parseFloat(((walletBase + dailyStats.pnl) * MAX_EXPOSURE_PCT).toFixed(2)),
+    walletStimato:     parseFloat((walletBase > 0 ? walletBase : 1000).toFixed(2)),
+    prossimaTrade:     parseFloat(((walletBase > 0 ? walletBase : 1000) * MAX_EXPOSURE_PCT).toFixed(2)),
     oggi:              dailyStats,
     posizioniAperte:   posizioniAperte.length,
     pnlHistory:        pnlHistory.slice(-100),
@@ -508,4 +520,12 @@ function getDashboardData() {
   return { posizioniAperte, pnlHistory: pnlHistory.slice(-200), walletHistory: walletHistory.slice(-200), dailyStats };
 }
 
-module.exports = { piazzaOrdine, registraEsito, getStato, getDashboardData, verificaSicurezza };
+async function forzaLetturaSaldo() {
+  const saldo = await getSaldoWallet();
+  console.log('[Execution] Lettura forzata saldo:', saldo);
+  return saldo;
+}
+
+function getWalletBase() { return walletBase; }
+
+module.exports = { piazzaOrdine, registraEsito, getStato, getDashboardData, verificaSicurezza, forzaLetturaSaldo, getWalletBase };
