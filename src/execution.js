@@ -60,31 +60,81 @@ function getWallet() {
   }
 }
 
-// ── Saldo USDC reale su Polygon via CLOB API ──────────────
+// ── L1 Headers per CLOB API ──────────────────────────────
+// Polymarket usa EIP-712 per L1 auth, poi HMAC per L2
+async function getL1Headers(wallet, method, path, body) {
+  const ts    = Math.floor(Date.now() / 1000).toString();
+  const nonce = '0';
+  // L1: firma EIP-712 del messaggio di autenticazione
+  const domain = { name: 'ClobAuthDomain', version: '1', chainId: CHAIN_ID };
+  const types  = { ClobAuth: [
+    { name: 'address',   type: 'address' },
+    { name: 'timestamp', type: 'string'  },
+    { name: 'nonce',     type: 'uint256' },
+    { name: 'message',   type: 'string'  }
+  ]};
+  const value  = {
+    address:   wallet.address,
+    timestamp: ts,
+    nonce:     0,
+    message:   'This message attests that I am the owner/operator of this wallet'
+  };
+  const sig = await wallet.signTypedData(domain, types, value);
+  return {
+    'POLY_ADDRESS':   wallet.address,
+    'POLY_SIGNATURE': sig,
+    'POLY_TIMESTAMP': ts,
+    'POLY_NONCE':     nonce,
+    'Content-Type':   'application/json'
+  };
+}
+
+// ── Crea o ottieni API credentials (L2) ──────────────────
+let apiCreds = null; // { apiKey, secret, passphrase }
+
+async function getApiCreds(wallet) {
+  if (apiCreds) return apiCreds;
+  try {
+    const headers = await getL1Headers(wallet, 'GET', '/auth/api-key');
+    const r = await axios.get(CLOB_HOST + '/auth/api-key', { headers, timeout: 8000 });
+    apiCreds = r.data;
+    console.log('[Execution] API credentials ottenute:', apiCreds?.apiKey?.slice(0,8)+'...');
+    return apiCreds;
+  } catch(e) {
+    // Se non esistono, creale
+    try {
+      const headers = await getL1Headers(wallet, 'POST', '/auth/api-key');
+      const r = await axios.post(CLOB_HOST + '/auth/api-key', {}, { headers, timeout: 8000 });
+      apiCreds = r.data;
+      console.log('[Execution] API credentials create:', apiCreds?.apiKey?.slice(0,8)+'...');
+      return apiCreds;
+    } catch(e2) {
+      console.log('[Execution] API credentials non disponibili:', e2.message);
+      return null;
+    }
+  }
+}
+
+// ── Saldo USDC reale su Polygon ───────────────────────────
 async function getSaldoWallet() {
   const wallet = getWallet();
   if (!wallet || !TRADING_ENABLED) return null;
   try {
-    const ts        = Math.floor(Date.now() / 1000).toString();
-    const signature = await wallet.signMessage(`${ts}GET/balance`);
-    const r = await axios.get(CLOB_HOST + '/balance', {
-      headers: {
-        'POLY_ADDRESS':   wallet.address,
-        'POLY_SIGNATURE': signature,
-        'POLY_TIMESTAMP': ts,
-        'POLY_NONCE':     '0'
-      },
-      timeout: 8000
-    });
-    const saldo = parseFloat(r.data?.balance || r.data?.USDC || 0);
+    const headers = await getL1Headers(wallet, 'GET', '/balance');
+    const r = await axios.get(CLOB_HOST + '/balance', { headers, timeout: 8000 });
+    // Polymarket restituisce il saldo in vari formati
+    const saldo = parseFloat(
+      r.data?.balance || r.data?.USDC || r.data?.collateral || r.data?.cash || 0
+    );
     if (saldo > 0) {
       walletBase = saldo;
       walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
       if (walletHistory.length > 1000) walletHistory.shift();
+      console.log(`[Execution] Saldo reale: $${saldo.toFixed(2)} USDC`);
     }
-    return saldo;
+    return saldo > 0 ? saldo : null;
   } catch(e) {
-    console.log('[Execution] Saldo non disponibile:', e.message);
+    console.log('[Execution] Saldo non disponibile (uso stima):', e.message);
     return null;
   }
 }
