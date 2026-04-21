@@ -587,6 +587,16 @@ app.get('/execution/status', (req, res) => {
   res.json(execution.getStato());
 });
 
+app.get('/execution/saldo', async (req, res) => {
+  const execution = require('./execution');
+  try {
+    const saldo = await execution.forzaLetturaSaldo();
+    res.json({ saldo, walletBase: execution.getWalletBase(), timestamp: new Date().toISOString() });
+  } catch(e) {
+    res.json({ errore: e.message });
+  }
+});
+
 app.get('/execution/dashboard', (req, res) => {
   const execution = require('./execution');
   res.json(execution.getDashboardData());
