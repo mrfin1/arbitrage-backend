@@ -142,12 +142,18 @@ async function getSaldoWallet() {
       'https://1rpc.io/matic',
       'https://polygon-bor-rpc.publicnode.com'
     ].filter(Boolean);
+    console.log('[Execution] RPC configurati:', POLYGON_RPCS.length, '| Alchemy:', !!process.env.POLYGON_RPC_URL);
     let hex = null;
     for (const rpc of POLYGON_RPCS) {
       try {
+        console.log('[Execution] Provo RPC:', rpc.slice(0,40)+'...');
         const r2 = await axios.post(rpc, payload, { timeout: 6000 });
+        console.log('[Execution] RPC risposta:', JSON.stringify(r2.data).slice(0,100));
         if (r2.data?.result && r2.data.result !== '0x') { hex = r2.data.result; break; }
-      } catch(e2) { continue; }
+      } catch(e2) {
+        console.log('[Execution] RPC fallito:', rpc.slice(0,40), '|', e2.message);
+        continue;
+      }
     }
     // ABI-encoded: balanceOf(address)
     const addr    = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
