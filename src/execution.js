@@ -115,26 +115,39 @@ async function getApiCreds(wallet) {
   }
 }
 
-// ── Saldo USDC reale su Polygon ───────────────────────────
+// ── Saldo USDC reale da Polygon RPC (no auth richiesta) ──
+// USDC su Polygon: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+// balanceOf(address) = keccak256("balanceOf(address)").slice(0,4) = 0x70a08231
 async function getSaldoWallet() {
   const wallet = getWallet();
-  if (!wallet || !TRADING_ENABLED) return null;
+  if (!wallet) return null;
   try {
-    const headers = await getL1Headers(wallet, 'GET', '/balance');
-    const r = await axios.get(CLOB_HOST + '/balance', { headers, timeout: 8000 });
-    // Polymarket restituisce il saldo in vari formati
-    const saldo = parseFloat(
-      r.data?.balance || r.data?.USDC || r.data?.collateral || r.data?.cash || 0
-    );
-    if (saldo > 0) {
-      walletBase = saldo;
-      walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
-      if (walletHistory.length > 1000) walletHistory.shift();
-      console.log(`[Execution] Saldo reale: $${saldo.toFixed(2)} USDC`);
+    const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+    const POLYGON_RPC  = 'https://polygon-rpc.com';
+    // ABI-encoded: balanceOf(address)
+    const addr    = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
+    const data    = '0x70a08231000000000000000000000000' + addr;
+    const payload = {
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: USDC_POLYGON, data }, 'latest']
+    };
+    const r = await axios.post(POLYGON_RPC, payload, { timeout: 8000 });
+    const hex = r.data?.result;
+    if (!hex || hex === '0x') return null;
+    // USDC ha 6 decimali
+    const saldo = parseInt(hex, 16) / 1e6;
+    if (saldo >= 0) {
+      walletBase = saldo || walletBase;
+      if (saldo > 0) {
+        walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
+        if (walletHistory.length > 1000) walletHistory.shift();
+        console.log(`[Execution] Saldo USDC su Polygon: $${saldo.toFixed(2)}`);
+      }
+      return saldo;
     }
-    return saldo > 0 ? saldo : null;
+    return null;
   } catch(e) {
-    console.log('[Execution] Saldo non disponibile (uso stima):', e.message);
+    console.log('[Execution] Saldo Polygon non disponibile:', e.message);
     return null;
   }
 }
