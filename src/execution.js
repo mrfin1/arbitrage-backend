@@ -128,56 +128,64 @@ async function getApiCreds(wallet) {
 }
 
 // ── Saldo USDC reale da Polygon RPC (no auth richiesta) ──
-// Saldo wallet — usa CLOB API Polymarket o variabile d'ambiente come fallback
+// Saldo USDC reale — legge dal proxy wallet Polymarket su Polygon
+// Il proxy è derivato deterministicamente dall'EOA tramite il contratto Polymarket
 async function getSaldoWallet() {
-  // 1. Prova a leggere dalla CLOB API di Polymarket (richiede auth)
   const wallet = getWallet();
-  if (wallet && TRADING_ENABLED) {
-    try {
-      const creds = await getApiCreds(wallet);
-      if (creds?.apiKey) {
-        const ts      = Math.floor(Date.now() / 1000).toString();
-        const method  = 'GET';
-        const path    = '/balance';
-        const crypto  = require('crypto');
-        const sig     = crypto.createHmac('sha256', Buffer.from(creds.secret, 'base64'))
-                              .update(ts + method + path).digest('base64');
-        const r = await axios.get(CLOB_HOST + path, {
-          headers: {
-            'POLY_ADDRESS':    wallet.address,
-            'POLY_API_KEY':    creds.apiKey,
-            'POLY_SIGNATURE':  sig,
-            'POLY_TIMESTAMP':  ts,
-            'POLY_PASSPHRASE': creds.passphrase
-          },
-          timeout: 8000
-        });
-        const saldo = parseFloat(r.data?.balance || r.data?.USDC || r.data?.collateral || 0);
-        if (saldo > 0) {
-          walletBase = saldo;
-          walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
-          if (walletHistory.length > 1000) walletHistory.shift();
-          console.log(`[Execution] Saldo CLOB API: $${saldo.toFixed(2)} USDC`);
-          return saldo;
-        }
-      }
-    } catch(e) {
-      console.log('[Execution] CLOB balance non disponibile:', e.message);
-    }
-  }
+  if (!wallet) return null;
+  try {
+    const USDC_POLYGON   = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+    // CTFExchange: getPolyProxyWalletAddress(address) = 0x45c97e5b
+    // Deriva l'indirizzo proxy Polymarket dall'EOA
+    const CTF_EXCHANGE   = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+    const eoa            = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
+    const proxyCallData  = '0x45c97e5b000000000000000000000000' + eoa;
 
-  // 2. Fallback — usa variabile d'ambiente WALLET_BALANCE_USDC
-  const envBalance = parseFloat(process.env.WALLET_BALANCE_USDC || '0');
-  if (envBalance > 0) {
-    if (walletBase !== envBalance) {
-      walletBase = envBalance;
-      walletHistory.push({ ts: new Date().toISOString(), valore: envBalance });
-      console.log(`[Execution] Saldo da variabile d'ambiente: $${envBalance.toFixed(2)} USDC`);
-    }
-    return envBalance;
-  }
+    const rpc = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
 
-  return null;
+    // 1. Ottieni indirizzo proxy dal contratto
+    const proxyRes = await axios.post(rpc, {
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: CTF_EXCHANGE, data: proxyCallData }, 'latest']
+    }, { timeout: 8000 });
+
+    let proxyAddress = null;
+    if (proxyRes.data?.result && proxyRes.data.result !== '0x' && proxyRes.data.result !== '0x' + '0'.repeat(64)) {
+      // L'indirizzo è negli ultimi 40 chars del result (20 bytes)
+      proxyAddress = '0x' + proxyRes.data.result.slice(-40);
+      console.log('[Execution] Proxy Polymarket:', proxyAddress);
+    }
+
+    // 2. Leggi saldo USDC del proxy (o dell'EOA come fallback)
+    const targetAddr = proxyAddress || wallet.address;
+    const addrPadded = targetAddr.toLowerCase().replace('0x','').padStart(64,'0');
+    const balanceData = '0x70a08231000000000000000000000000' + addrPadded;
+
+    const balRes = await axios.post(rpc, {
+      jsonrpc: '2.0', id: 2, method: 'eth_call',
+      params: [{ to: USDC_POLYGON, data: balanceData }, 'latest']
+    }, { timeout: 8000 });
+
+    const hex   = balRes.data?.result;
+    if (!hex || hex === '0x' || hex === '0x' + '0'.repeat(64)) {
+      console.log('[Execution] Saldo 0 su', targetAddr);
+      return 0;
+    }
+
+    const saldo = parseInt(hex, 16) / 1e6;
+    console.log(`[Execution] Saldo USDC (${proxyAddress ? 'proxy' : 'EOA'}): $${saldo.toFixed(2)}`);
+
+    if (saldo >= 0) {
+      if (saldo > 0) walletBase = saldo;
+      walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
+      if (walletHistory.length > 1000) walletHistory.shift();
+      return saldo;
+    }
+    return null;
+  } catch(e) {
+    console.log('[Execution] getSaldoWallet errore:', e.message);
+    return null;
+  }
 }
 
 // ── Calcolo trade size compounding ───────────────────────
