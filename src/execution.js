@@ -139,8 +139,9 @@ async function getSaldoWallet() {
   try {
     const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
     const rpc          = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
-    const addrPadded   = proxyAddress.toLowerCase().replace('0x','').padStart(64,'0');
-    const data         = '0x70a08231000000000000000000000000' + addrPadded;
+    // Costruisci data field: selector(4 bytes) + 12 bytes zeri + indirizzo(20 bytes)
+    const addrClean    = proxyAddress.toLowerCase().replace(/^0x/i, '').slice(-40).padStart(40,'0');
+    const data         = '0x70a08231' + '000000000000000000000000' + addrClean;
 
     console.log('[Execution] Chiamo RPC:', rpc.slice(0,50));
     console.log('[Execution] Proxy addr:', proxyAddress);
