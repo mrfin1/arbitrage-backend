@@ -128,52 +128,30 @@ async function getApiCreds(wallet) {
 }
 
 // ── Saldo USDC reale da Polygon RPC (no auth richiesta) ──
-// Saldo USDC reale — legge dal proxy wallet Polymarket su Polygon
-// Il proxy è derivato deterministicamente dall'EOA tramite il contratto Polymarket
+// Saldo USDC reale — legge direttamente dal proxy wallet Polymarket su Polygon
+// POLYMARKET_PROXY_ADDRESS = indirizzo da Settings > Wallet Address su polymarket.com
 async function getSaldoWallet() {
-  const wallet = getWallet();
-  if (!wallet) return null;
+  const proxyAddress = process.env.POLYMARKET_PROXY_ADDRESS;
+  if (!proxyAddress) {
+    console.log('[Execution] POLYMARKET_PROXY_ADDRESS non configurata');
+    return null;
+  }
   try {
-    const USDC_POLYGON   = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-    // CTFExchange: getPolyProxyWalletAddress(address) = 0x45c97e5b
-    // Deriva l'indirizzo proxy Polymarket dall'EOA
-    const CTF_EXCHANGE   = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
-    const eoa            = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
-    const proxyCallData  = '0x45c97e5b000000000000000000000000' + eoa;
+    const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+    const rpc          = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
+    const addrPadded   = proxyAddress.toLowerCase().replace('0x','').padStart(64,'0');
+    const data         = '0x70a08231000000000000000000000000' + addrPadded;
 
-    const rpc = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
-
-    // 1. Ottieni indirizzo proxy dal contratto
-    const proxyRes = await axios.post(rpc, {
+    const r = await axios.post(rpc, {
       jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to: CTF_EXCHANGE, data: proxyCallData }, 'latest']
+      params: [{ to: USDC_POLYGON, data }, 'latest']
     }, { timeout: 8000 });
 
-    let proxyAddress = null;
-    if (proxyRes.data?.result && proxyRes.data.result !== '0x' && proxyRes.data.result !== '0x' + '0'.repeat(64)) {
-      // L'indirizzo è negli ultimi 40 chars del result (20 bytes)
-      proxyAddress = '0x' + proxyRes.data.result.slice(-40);
-      console.log('[Execution] Proxy Polymarket:', proxyAddress);
-    }
-
-    // 2. Leggi saldo USDC del proxy (o dell'EOA come fallback)
-    const targetAddr = proxyAddress || wallet.address;
-    const addrPadded = targetAddr.toLowerCase().replace('0x','').padStart(64,'0');
-    const balanceData = '0x70a08231000000000000000000000000' + addrPadded;
-
-    const balRes = await axios.post(rpc, {
-      jsonrpc: '2.0', id: 2, method: 'eth_call',
-      params: [{ to: USDC_POLYGON, data: balanceData }, 'latest']
-    }, { timeout: 8000 });
-
-    const hex   = balRes.data?.result;
-    if (!hex || hex === '0x' || hex === '0x' + '0'.repeat(64)) {
-      console.log('[Execution] Saldo 0 su', targetAddr);
-      return 0;
-    }
+    const hex   = r.data?.result;
+    if (!hex || hex === '0x' || /^0x0+$/.test(hex)) return 0;
 
     const saldo = parseInt(hex, 16) / 1e6;
-    console.log(`[Execution] Saldo USDC (${proxyAddress ? 'proxy' : 'EOA'}): $${saldo.toFixed(2)}`);
+    console.log(`[Execution] Saldo USDC proxy: $${saldo.toFixed(2)}`);
 
     if (saldo >= 0) {
       if (saldo > 0) walletBase = saldo;
