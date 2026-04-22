@@ -128,57 +128,56 @@ async function getApiCreds(wallet) {
 }
 
 // ── Saldo USDC reale da Polygon RPC (no auth richiesta) ──
-// USDC su Polygon: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
-// balanceOf(address) = keccak256("balanceOf(address)").slice(0,4) = 0x70a08231
+// Saldo wallet — usa CLOB API Polymarket o variabile d'ambiente come fallback
 async function getSaldoWallet() {
+  // 1. Prova a leggere dalla CLOB API di Polymarket (richiede auth)
   const wallet = getWallet();
-  if (!wallet) return null;
-  try {
-    const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-    // ABI-encoded: balanceOf(address) — PRIMA del loop
-    const addr    = wallet.address.toLowerCase().replace('0x','').padStart(64,'0');
-    const data    = '0x70a08231000000000000000000000000' + addr;
-    const payload = {
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to: USDC_POLYGON, data }, 'latest']
-    };
-    // RPC Polygon — usa variabile d'ambiente o fallback pubblico
-    const POLYGON_RPCS = [
-      process.env.POLYGON_RPC_URL,
-      'https://polygon.drpc.org',
-      'https://1rpc.io/matic',
-      'https://polygon-bor-rpc.publicnode.com'
-    ].filter(Boolean);
-    console.log('[Execution] RPC configurati:', POLYGON_RPCS.length, '| Alchemy:', !!process.env.POLYGON_RPC_URL);
-    let hex = null;
-    for (const rpc of POLYGON_RPCS) {
-      try {
-        console.log('[Execution] Provo RPC:', rpc.slice(0,40)+'...');
-        const r2 = await axios.post(rpc, payload, { timeout: 6000 });
-        console.log('[Execution] RPC risposta:', JSON.stringify(r2.data).slice(0,100));
-        if (r2.data?.result && r2.data.result !== '0x') { hex = r2.data.result; break; }
-      } catch(e2) {
-        console.log('[Execution] RPC fallito:', rpc.slice(0,40), '|', e2.message);
-        continue;
+  if (wallet && TRADING_ENABLED) {
+    try {
+      const creds = await getApiCreds(wallet);
+      if (creds?.apiKey) {
+        const ts      = Math.floor(Date.now() / 1000).toString();
+        const method  = 'GET';
+        const path    = '/balance';
+        const crypto  = require('crypto');
+        const sig     = crypto.createHmac('sha256', Buffer.from(creds.secret, 'base64'))
+                              .update(ts + method + path).digest('base64');
+        const r = await axios.get(CLOB_HOST + path, {
+          headers: {
+            'POLY_ADDRESS':    wallet.address,
+            'POLY_API_KEY':    creds.apiKey,
+            'POLY_SIGNATURE':  sig,
+            'POLY_TIMESTAMP':  ts,
+            'POLY_PASSPHRASE': creds.passphrase
+          },
+          timeout: 8000
+        });
+        const saldo = parseFloat(r.data?.balance || r.data?.USDC || r.data?.collateral || 0);
+        if (saldo > 0) {
+          walletBase = saldo;
+          walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
+          if (walletHistory.length > 1000) walletHistory.shift();
+          console.log(`[Execution] Saldo CLOB API: $${saldo.toFixed(2)} USDC`);
+          return saldo;
+        }
       }
+    } catch(e) {
+      console.log('[Execution] CLOB balance non disponibile:', e.message);
     }
-    if (!hex) return null;
-    // USDC ha 6 decimali
-    const saldo = parseInt(hex, 16) / 1e6;
-    if (saldo >= 0) {
-      walletBase = saldo || walletBase;
-      if (saldo > 0) {
-        walletHistory.push({ ts: new Date().toISOString(), valore: parseFloat(saldo.toFixed(2)) });
-        if (walletHistory.length > 1000) walletHistory.shift();
-        console.log(`[Execution] Saldo USDC su Polygon: $${saldo.toFixed(2)}`);
-      }
-      return saldo;
-    }
-    return null;
-  } catch(e) {
-    console.log('[Execution] Saldo Polygon non disponibile:', e.message);
-    return null;
   }
+
+  // 2. Fallback — usa variabile d'ambiente WALLET_BALANCE_USDC
+  const envBalance = parseFloat(process.env.WALLET_BALANCE_USDC || '0');
+  if (envBalance > 0) {
+    if (walletBase !== envBalance) {
+      walletBase = envBalance;
+      walletHistory.push({ ts: new Date().toISOString(), valore: envBalance });
+      console.log(`[Execution] Saldo da variabile d'ambiente: $${envBalance.toFixed(2)} USDC`);
+    }
+    return envBalance;
+  }
+
+  return null;
 }
 
 // ── Calcolo trade size compounding ───────────────────────
