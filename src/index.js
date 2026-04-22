@@ -458,6 +458,28 @@ async function controllaGap() {
           '💵 P&L su $1K: <b>+$' + (pnlNetto / 100 * 1000).toFixed(2) + '</b>\n\n' +
           '⏰ ' + new Date().toUTCString();
         await sendTelegram(msg);
+
+        // ── ESEGUI ORDINE REALE ───────────────────────────────
+        const execution = require('./execution');
+        const segnaleExec = {
+          asset: asset.key, finestra: fin.key, direzione,
+          prezzoContratto: prezzoC, pnlNetto, profittevole,
+          slug: m.slug, score: parseFloat(score.toFixed(4)),
+          closeAt: m.closeAt || null, volume: m.volume || 0,
+          momentum, distanzaDollar: parseFloat(distanza.toFixed(2))
+        };
+        execution.piazzaOrdine(segnaleExec).then(result => {
+          if (result.successo) {
+            const tipo = result.paperTrade ? 'PAPER' : 'LIVE';
+            console.log('[Execution] ' + tipo + ': ' + asset.key + '/' + fin.key + ' ' + direzione + ' $' + result.usdcSpesi);
+            if (!result.paperTrade) {
+              sendTelegram('✅ <b>ORDINE ESEGUITO</b>\n' + asset.key + '/' + fin.key.toUpperCase() + ' ' + direzione + '\nSize: <b>$' + result.usdcSpesi + '</b>\nP&L stimato: <b>+$' + result.pnlStimato + '</b>');
+            }
+          } else {
+            console.log('[Execution] Bloccato: ' + result.motivo);
+          }
+        }).catch(e => console.error('[Execution] Errore:', e.message));
+        // ─────────────────────────────────────────────────────
       }
 
       // Blocco alert se volume insufficiente ma score ok
