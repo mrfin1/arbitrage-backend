@@ -129,16 +129,12 @@ async function getSaldoWallet() {
     const addrClean    = proxyAddress.toLowerCase().replace(/^0x/i, '').slice(-40).padStart(40,'0');
     const data         = '0x70a08231' + '000000000000000000000000' + addrClean;
 
-    console.log('[Execution] Chiamo RPC:', rpc.slice(0,50));
-    console.log('[Execution] Proxy addr:', proxyAddress);
-    console.log('[Execution] Data:', data);
     const r = await axios.post(rpc, {
       jsonrpc: '2.0', id: 1, method: 'eth_call',
       params: [{ to: USDC_POLYGON, data }, 'latest']
     }, { timeout: 8000 });
 
     const hex = r.data?.result;
-    console.log('[Execution] RPC result:', hex);
 
     if (!hex || hex === '0x') { console.log('[Execution] Hex vuoto'); return 0; }
 
