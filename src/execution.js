@@ -82,18 +82,31 @@ async function getClobClient() {
   if (!wallet) return null;
   if (_clobClient && _clobCreds) return _clobClient;
   try {
-    // Inizializza client L1
-    const l1Client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet);
-    // Deriva o crea API credentials (L2)
-    _clobCreds = await l1Client.createOrDeriveApiKey();
-    console.log('[Execution] CLOB API credentials:', _clobCreds.apiKey?.slice(0,8)+'...');
-    // Inizializza client L2 con funder = proxy address Polymarket
     const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
-    _clobClient = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, _clobCreds, 0, funder);
-    console.log('[Execution] ClobClient pronto | funder:', funder.slice(0,10)+'...');
+    // Step 1: L1 client per ottenere credentials
+    const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet);
+    _clobCreds = await l1.createOrDeriveApiKey();
+    console.log('[Execution] Credentials:', _clobCreds?.apiKey?.slice(0,8)+'...');
+    // Step 2: L2 client completo
+    // signatureType=0 per EOA/Phantom, funder=proxy Polymarket
+    _clobClient = new ClobClient(
+      CLOB_HOST,
+      CHAIN_ID,
+      wallet,
+      _clobCreds,
+      0,       // signatureType: 0=EOA
+      funder   // funder: indirizzo proxy Polymarket
+    );
+    // Verifica che createAndPostOrder esista
+    if (typeof _clobClient.createAndPostOrder !== 'function') {
+      console.error('[Execution] createAndPostOrder non disponibile — metodi:', Object.getOwnPropertyNames(Object.getPrototypeOf(_clobClient)).slice(0,10));
+      _clobClient = null;
+      return null;
+    }
+    console.log('[Execution] ClobClient L2 pronto | funder:', funder.slice(0,10)+'...');
     return _clobClient;
   } catch(e) {
-    console.error('[Execution] ClobClient init errore:', e.message);
+    console.error('[Execution] ClobClient errore:', e.message);
     _clobClient = null;
     _clobCreds  = null;
     return null;
@@ -317,15 +330,26 @@ async function piazzaOrdine(segnale) {
       const prezzoDecimale = parseFloat((segnale.prezzoContratto / 100).toFixed(4));
 
       // Crea e invia ordine GTC tramite SDK ufficiale
+      // Ottieni tick size reale per questo mercato
+      let tickSize = '0.01';
+      try {
+        const ts = await client.getTickSize(tokenId);
+        if (ts) tickSize = ts;
+      } catch(e) {}
+      console.log('[Execution] tokenId:', tokenId.slice(0,20), '| price:', prezzoDecimale, '| size:', size, '| tickSize:', tickSize);
+
       const resp = await chiamataConRetry(
         () => client.createAndPostOrder(
           {
-            tokenID: tokenId,
-            price:   prezzoDecimale,
-            size:    size,
-            side:    lato,
+            tokenID:    tokenId,
+            price:      prezzoDecimale,
+            size:       size,
+            side:       Side.BUY,
+            feeRateBps: 0,
+            expiration: 0,
+            taker:      '0x0000000000000000000000000000000000000000'
           },
-          { tickSize: '0.01', negRisk: false },
+          { tickSize, negRisk: false },
           OrderType.GTC
         ),
         3, ordineId
