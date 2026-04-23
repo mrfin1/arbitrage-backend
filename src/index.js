@@ -605,11 +605,26 @@ app.get('/execution/dashboard', (req, res) => {
 
 app.post('/execution/test', async (req, res) => {
   const execution = require('./execution');
+  // Usa il contratto 15M attualmente attivo per il test
+  const m15 = polyMarkets['15m'] && polyMarkets['15m']['BTC'];
+  const m1h = polyMarkets['1h'] && polyMarkets['1h']['BTC'];
+  const mercato = m15 || m1h;
+  if (!mercato) {
+    return res.json({ successo: false, motivo: 'Nessun contratto attivo al momento' });
+  }
+  const finestra = m15 ? '15m' : '1h';
+  const direzione = 'UP';
+  const prezzoC = mercato.prezzoUp;
+  const pnlNetto = parseFloat(((100 - prezzoC) - 3).toFixed(2));
   const segnaleTest = {
-    asset: 'BTC', finestra: '5m', direzione: 'UP',
-    prezzoContratto: 52, pnlNetto: 45, profittevole: true,
-    slug: 'btc-updown-5m-test', score: 1.5, volume: 2000
+    asset: 'BTC', finestra, direzione,
+    prezzoContratto: prezzoC, pnlNetto,
+    profittevole: prezzoC <= 75 && pnlNetto >= 5,
+    slug: mercato.slug, score: 1.5,
+    volume: mercato.volume || 0,
+    closeAt: mercato.closeAt || null
   };
+  console.log('[Test] Ordine test su slug reale:', mercato.slug);
   const result = await execution.piazzaOrdine(segnaleTest);
   res.json(result);
 });
