@@ -81,38 +81,34 @@ async function getClobClient() {
   const wallet = getWallet();
   if (!wallet) return null;
   if (_clobClient && _clobCreds) return _clobClient;
-  try {
-    const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
-    console.log('[Execution] Init ClobClient | wallet:', wallet.address.slice(0,10), '| funder:', funder.slice(0,10));
-    // Step 1: L1 client per ottenere credentials
-    const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, 2, funder);
-    console.log('[Execution] L1 client creato | tipo createOrDeriveApiKey:', typeof l1.createOrDeriveApiKey);
-    _clobCreds = await l1.createOrDeriveApiKey();
-    console.log('[Execution] Credentials OK:', JSON.stringify(_clobCreds).slice(0,80));
-    // Step 2: L2 client completo
-    // signatureType=2 per Gnosis Safe (browser wallet proxy — Phantom su Polymarket.com)
-    _clobClient = new ClobClient(
-      CLOB_HOST,
-      CHAIN_ID,
-      wallet,
-      _clobCreds,
-      2,       // signatureType: 2=Gnosis Safe (browser wallet proxy)
-      funder   // funder: indirizzo proxy Polymarket
-    );
-    // Verifica che createAndPostOrder esista
-    if (typeof _clobClient.createAndPostOrder !== 'function') {
-      console.error('[Execution] createAndPostOrder non disponibile — metodi:', Object.getOwnPropertyNames(Object.getPrototypeOf(_clobClient)).slice(0,10));
-      _clobClient = null;
-      return null;
+
+  const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
+
+  // Prova signatureType 0 (EOA) poi 2 (Gnosis Safe)
+  for (const sigType of [0, 2]) {
+    try {
+      console.log('[Execution] Provo signatureType:', sigType, '| funder:', funder.slice(0,10));
+      const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, sigType, funder);
+      const creds = await l1.createOrDeriveApiKey();
+      if (!creds || !creds.apiKey) {
+        console.log('[Execution] Credentials vuote con sigType', sigType);
+        continue;
+      }
+      console.log('[Execution] Credentials OK sigType', sigType, ':', creds.apiKey.slice(0,8)+'...');
+      const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds, sigType, funder);
+      if (typeof client.createAndPostOrder === 'function') {
+        _clobCreds  = creds;
+        _clobClient = client;
+        console.log('[Execution] ClobClient pronto | sigType:', sigType);
+        return _clobClient;
+      }
+      console.log('[Execution] createAndPostOrder mancante con sigType', sigType);
+    } catch(e) {
+      console.log('[Execution] sigType', sigType, 'errore:', e.message?.slice(0,100));
     }
-    console.log('[Execution] ClobClient L2 pronto | funder:', funder.slice(0,10)+'...');
-    return _clobClient;
-  } catch(e) {
-    console.error('[Execution] ClobClient errore:', e.message);
-    _clobClient = null;
-    _clobCreds  = null;
-    return null;
   }
+  console.error('[Execution] ClobClient non inizializzabile');
+  return null;
 }
 
 
