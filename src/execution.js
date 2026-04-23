@@ -89,9 +89,10 @@ async function getClobClient() {
   const secret     = process.env.POLY_SECRET;
   const passphrase = process.env.POLY_PASSPHRASE;
 
+  console.log('[Execution] Env creds:', apiKey ? 'apiKey OK' : 'apiKey MANCANTE', secret ? 'secret OK' : 'secret MANCANTE', passphrase ? 'passphrase OK' : 'passphrase MANCANTE');
   if (apiKey && secret && passphrase) {
     try {
-      _clobCreds = { key: apiKey, secret, passphrase };
+      _clobCreds = { key: apiKey, apiKey, secret, passphrase }; // supporta entrambi i formati
       // Prova signatureType 2 (Gnosis Safe proxy) poi 0 (EOA)
       for (const sigType of [2, 0]) {
         const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, _clobCreds, sigType, funder);
