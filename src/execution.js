@@ -83,18 +83,20 @@ async function getClobClient() {
   if (_clobClient && _clobCreds) return _clobClient;
   try {
     const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
+    console.log('[Execution] Init ClobClient | wallet:', wallet.address.slice(0,10), '| funder:', funder.slice(0,10));
     // Step 1: L1 client per ottenere credentials
-    const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet);
+    const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, 2, funder);
+    console.log('[Execution] L1 client creato | tipo createOrDeriveApiKey:', typeof l1.createOrDeriveApiKey);
     _clobCreds = await l1.createOrDeriveApiKey();
-    console.log('[Execution] Credentials:', _clobCreds?.apiKey?.slice(0,8)+'...');
+    console.log('[Execution] Credentials OK:', JSON.stringify(_clobCreds).slice(0,80));
     // Step 2: L2 client completo
-    // signatureType=0 per EOA/Phantom, funder=proxy Polymarket
+    // signatureType=2 per Gnosis Safe (browser wallet proxy — Phantom su Polymarket.com)
     _clobClient = new ClobClient(
       CLOB_HOST,
       CHAIN_ID,
       wallet,
       _clobCreds,
-      0,       // signatureType: 0=EOA
+      2,       // signatureType: 2=Gnosis Safe (browser wallet proxy)
       funder   // funder: indirizzo proxy Polymarket
     );
     // Verifica che createAndPostOrder esista
