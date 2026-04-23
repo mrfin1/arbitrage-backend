@@ -80,33 +80,51 @@ let _clobCreds  = null;
 async function getClobClient() {
   const wallet = getWallet();
   if (!wallet) return null;
-  if (_clobClient && _clobCreds) return _clobClient;
+  if (_clobClient) return _clobClient;
 
   const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
 
-  // Prova signatureType 0 (EOA) poi 2 (Gnosis Safe)
-  for (const sigType of [0, 2]) {
+  // Usa credentials salvate come variabili d'ambiente
+  const apiKey     = process.env.POLY_API_KEY;
+  const secret     = process.env.POLY_SECRET;
+  const passphrase = process.env.POLY_PASSPHRASE;
+
+  if (apiKey && secret && passphrase) {
     try {
-      console.log('[Execution] Provo signatureType:', sigType, '| funder:', funder.slice(0,10));
-      const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, sigType, funder);
-      const creds = await l1.createOrDeriveApiKey();
-      if (!creds || !creds.apiKey) {
-        console.log('[Execution] Credentials vuote con sigType', sigType);
-        continue;
+      _clobCreds = { key: apiKey, secret, passphrase };
+      // Prova signatureType 2 (Gnosis Safe proxy) poi 0 (EOA)
+      for (const sigType of [2, 0]) {
+        const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, _clobCreds, sigType, funder);
+        if (typeof client.createAndPostOrder === 'function') {
+          _clobClient = client;
+          console.log('[Execution] ClobClient pronto (env creds) | sigType:', sigType);
+          return _clobClient;
+        }
       }
-      console.log('[Execution] Credentials OK sigType', sigType, ':', creds.apiKey.slice(0,8)+'...');
-      const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds, sigType, funder);
-      if (typeof client.createAndPostOrder === 'function') {
-        _clobCreds  = creds;
-        _clobClient = client;
-        console.log('[Execution] ClobClient pronto | sigType:', sigType);
-        return _clobClient;
-      }
-      console.log('[Execution] createAndPostOrder mancante con sigType', sigType);
     } catch(e) {
-      console.log('[Execution] sigType', sigType, 'errore:', e.message?.slice(0,100));
+      console.error('[Execution] ClobClient env creds errore:', e.message?.slice(0,80));
     }
   }
+
+  // Fallback: deriva credentials on-the-fly
+  console.log('[Execution] Derivo credentials on-the-fly...');
+  for (const sigType of [2, 0]) {
+    try {
+      const l1    = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, sigType, funder);
+      const creds = await l1.createOrDeriveApiKey();
+      if (!creds?.key && !creds?.apiKey) continue;
+      _clobCreds  = creds;
+      const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds, sigType, funder);
+      if (typeof client.createAndPostOrder === 'function') {
+        _clobClient = client;
+        console.log('[Execution] ClobClient pronto (derivato) | sigType:', sigType);
+        return _clobClient;
+      }
+    } catch(e) {
+      console.log('[Execution] sigType', sigType, 'errore:', e.message?.slice(0,80));
+    }
+  }
+
   console.error('[Execution] ClobClient non inizializzabile');
   return null;
 }
@@ -441,4 +459,23 @@ async function forzaLetturaSaldo() {
 
 function getWalletBase() { return walletBase; }
 
-module.exports = { piazzaOrdine, registraEsito, getStato, getDashboardData, verificaSicurezza, forzaLetturaSaldo, getWalletBase };
+async function derivaCredentials() {
+  const wallet = getWallet();
+  if (!wallet) return null;
+  const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
+  for (const sigType of [0, 2]) {
+    try {
+      const l1 = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, sigType, funder);
+      const creds = await l1.createOrDeriveApiKey();
+      if (creds?.key || creds?.apiKey) {
+        console.log('[Execution] Credentials derivate sigType', sigType, ':', (creds.key||creds.apiKey).slice(0,8)+'...');
+        return creds;
+      }
+    } catch(e) {
+      console.log('[Execution] derivaCredentials sigType', sigType, ':', e.message?.slice(0,80));
+    }
+  }
+  return null;
+}
+
+module.exports = { piazzaOrdine, registraEsito, getStato, getDashboardData, verificaSicurezza, forzaLetturaSaldo, getWalletBase, derivaCredentials };
