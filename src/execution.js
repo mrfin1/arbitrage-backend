@@ -21,7 +21,8 @@
  */
 
 const axios  = require('axios');
-const { ethers } = require('ethers');
+const { ethers } = require('ethers'); // v5
+const { ClobClient, Side, OrderType } = require('@polymarket/clob-client');
 
 const TRADING_ENABLED    = process.env.TRADING_ENABLED === 'true';
 const MAX_DAILY_LOSS_PCT = parseFloat(process.env.MAX_DAILY_LOSS_PCT    || '0.15');
@@ -61,7 +62,7 @@ async function avviaLetturaSaldo() {
 setTimeout(avviaLetturaSaldo, 3000); // dopo 3 secondi dall'avvio
 setInterval(avviaLetturaSaldo, 5 * 60 * 1000); // ogni 5 minuti
 
-// ── Wallet ethers ─────────────────────────────────────────
+// ── Wallet ethers v5 ─────────────────────────────────────
 function getWallet() {
   if (!process.env.WALLET_PRIVATE_KEY) return null;
   try {
@@ -72,60 +73,34 @@ function getWallet() {
   }
 }
 
-// ── L1 Headers per CLOB API ──────────────────────────────
-// Polymarket usa EIP-712 per L1 auth, poi HMAC per L2
-async function getL1Headers(wallet, method, path, body) {
-  const ts    = Math.floor(Date.now() / 1000).toString();
-  const nonce = '0';
-  // L1: firma EIP-712 del messaggio di autenticazione
-  const domain = { name: 'ClobAuthDomain', version: '1', chainId: CHAIN_ID };
-  const types  = { ClobAuth: [
-    { name: 'address',   type: 'address' },
-    { name: 'timestamp', type: 'string'  },
-    { name: 'nonce',     type: 'uint256' },
-    { name: 'message',   type: 'string'  }
-  ]};
-  const value  = {
-    address:   wallet.address,
-    timestamp: ts,
-    nonce:     0,
-    message:   'This message attests that I am the owner/operator of this wallet'
-  };
-  const sig = await wallet.signTypedData(domain, types, value);
-  return {
-    'POLY_ADDRESS':   wallet.address,
-    'POLY_SIGNATURE': sig,
-    'POLY_TIMESTAMP': ts,
-    'POLY_NONCE':     nonce,
-    'Content-Type':   'application/json'
-  };
-}
+// ── ClobClient ufficiale Polymarket ──────────────────────
+let _clobClient = null;
+let _clobCreds  = null;
 
-// ── Crea o ottieni API credentials (L2) ──────────────────
-let apiCreds = null; // { apiKey, secret, passphrase }
-
-async function getApiCreds(wallet) {
-  if (apiCreds) return apiCreds;
+async function getClobClient() {
+  const wallet = getWallet();
+  if (!wallet) return null;
+  if (_clobClient && _clobCreds) return _clobClient;
   try {
-    const headers = await getL1Headers(wallet, 'GET', '/auth/api-key');
-    const r = await axios.get(CLOB_HOST + '/auth/api-key', { headers, timeout: 8000 });
-    apiCreds = r.data;
-    console.log('[Execution] API credentials ottenute:', apiCreds?.apiKey?.slice(0,8)+'...');
-    return apiCreds;
+    // Inizializza client L1
+    const l1Client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet);
+    // Deriva o crea API credentials (L2)
+    _clobCreds = await l1Client.createOrDeriveApiKey();
+    console.log('[Execution] CLOB API credentials:', _clobCreds.apiKey?.slice(0,8)+'...');
+    // Inizializza client L2 con funder = proxy address Polymarket
+    const funder = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
+    _clobClient = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, _clobCreds, 0, funder);
+    console.log('[Execution] ClobClient pronto | funder:', funder.slice(0,10)+'...');
+    return _clobClient;
   } catch(e) {
-    // Se non esistono, creale
-    try {
-      const headers = await getL1Headers(wallet, 'POST', '/auth/api-key');
-      const r = await axios.post(CLOB_HOST + '/auth/api-key', {}, { headers, timeout: 8000 });
-      apiCreds = r.data;
-      console.log('[Execution] API credentials create:', apiCreds?.apiKey?.slice(0,8)+'...');
-      return apiCreds;
-    } catch(e2) {
-      console.log('[Execution] API credentials non disponibili:', e2.message);
-      return null;
-    }
+    console.error('[Execution] ClobClient init errore:', e.message);
+    _clobClient = null;
+    _clobCreds  = null;
+    return null;
   }
 }
+
+
 
 // ── Saldo USDC reale da Polygon RPC (no auth richiesta) ──
 // Saldo USDC reale — legge direttamente dal proxy wallet Polymarket su Polygon
@@ -243,37 +218,6 @@ async function getTokenIds(slug, direzione) {
   }
 }
 
-// ── EIP-712 — firma ordine Polymarket ────────────────────
-async function firmaOrdineEIP712(wallet, ordine) {
-  // Domain Polymarket su Polygon
-  const domain = {
-    name:              'ClobAuthDomain',
-    version:           '1',
-    chainId:           CHAIN_ID,
-    verifyingContract: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E' // CTF Exchange Polygon
-  };
-
-  // Tipi EIP-712 per ordine Polymarket
-  const types = {
-    Order: [
-      { name: 'salt',         type: 'uint256' },
-      { name: 'maker',        type: 'address' },
-      { name: 'signer',       type: 'address' },
-      { name: 'taker',        type: 'address' },
-      { name: 'tokenId',      type: 'uint256' },
-      { name: 'makerAmount',  type: 'uint256' },
-      { name: 'takerAmount',  type: 'uint256' },
-      { name: 'expiration',   type: 'uint256' },
-      { name: 'nonce',        type: 'uint256' },
-      { name: 'feeRateBps',   type: 'uint256' },
-      { name: 'side',         type: 'uint8'   },
-      { name: 'signatureType',type: 'uint8'   },
-    ]
-  };
-
-  const firma = await wallet.signTypedData(domain, types, ordine);
-  return firma;
-}
 
 // ── Retry con backoff ─────────────────────────────────────
 async function chiamataConRetry(fn, maxTentativi, ordineId) {
@@ -365,85 +309,40 @@ async function piazzaOrdine(segnale) {
     if (TRADING_ENABLED && wallet) {
       console.log(`[Execution] 🔴 LIVE ORDER — ${segnale.finestra} ${segnale.direzione} @${segnale.prezzoContratto}¢ size:$${tradeSize}`);
 
-      // Costruisci ordine EIP-712
-      const salt      = BigInt(Math.floor(Math.random() * 1e15));
-      const makerAmt  = BigInt(Math.round(tradeSize * 1e6));   // USDC 6 decimali
-      const takerAmt  = BigInt(Math.round(size * 1e6));        // shares 6 decimali
-      const expiration= BigInt(Math.floor(Date.now()/1000) + 3600); // 1h
-      const sideNum   = segnale.direzione === 'UP' ? 0 : 1;
+      // Usa ClobClient ufficiale Polymarket
+      const client = await getClobClient();
+      if (!client) return { successo: false, motivo: 'ClobClient non inizializzato' };
 
-      const ordineEIP = {
-        salt:          salt,
-        maker:         wallet.address,
-        signer:        wallet.address,
-        taker:         '0x0000000000000000000000000000000000000000',
-        tokenId:       BigInt(tokenId),
-        makerAmount:   makerAmt,
-        takerAmount:   takerAmt,
-        expiration:    expiration,
-        nonce:         BigInt(0),
-        feeRateBps:    BigInt(0),
-        side:          sideNum,
-        signatureType: 0
-      };
+      const lato = segnale.direzione === 'UP' ? Side.BUY : Side.BUY; // compra sempre il lato corretto
+      const prezzoDecimale = parseFloat((segnale.prezzoContratto / 100).toFixed(4));
 
-      // Firma EIP-712
-      const firma = await firmaOrdineEIP712(wallet, ordineEIP);
-      console.log('[Execution] Firma EIP-712 generata:', firma.slice(0, 20) + '...');
-
-      // Payload per CLOB API
-      const payload = {
-        order: {
-          salt:          salt.toString(),
-          maker:         wallet.address,
-          signer:        wallet.address,
-          taker:         '0x0000000000000000000000000000000000000000',
-          tokenId:       tokenId,
-          makerAmount:   makerAmt.toString(),
-          takerAmount:   takerAmt.toString(),
-          expiration:    expiration.toString(),
-          nonce:         '0',
-          feeRateBps:    '0',
-          side:          sideNum === 0 ? 'BUY' : 'SELL',
-          signatureType: 0,
-          signature:     firma
-        },
-        owner:   wallet.address,
-        orderType: 'GTC'
-      };
-
-      // Header autenticazione CLOB
-      const ts    = Math.floor(Date.now() / 1000).toString();
-      const nonce = '0';
-      const msg   = `${ts}POST/order`;
-      const authSig = await wallet.signMessage(msg);
-
-      const risposta = await chiamataConRetry(
-        () => axios.post(CLOB_HOST + '/order', payload, {
-          headers: {
-            'Content-Type':   'application/json',
-            'POLY_ADDRESS':   wallet.address,
-            'POLY_SIGNATURE': authSig,
-            'POLY_TIMESTAMP': ts,
-            'POLY_NONCE':     nonce
+      // Crea e invia ordine GTC tramite SDK ufficiale
+      const resp = await chiamataConRetry(
+        () => client.createAndPostOrder(
+          {
+            tokenID: tokenId,
+            price:   prezzoDecimale,
+            size:    size,
+            side:    lato,
           },
-          timeout: 10000
-        }),
+          { tickSize: '0.01', negRisk: false },
+          OrderType.GTC
+        ),
         3, ordineId
       );
 
-      risultato.ordineIdClob = risposta.dati?.orderID || risposta.dati?.id;
-      console.log('[Execution] Ordine inviato:', risultato.ordineIdClob);
+      risultato.ordineIdClob = resp.dati?.orderID || resp.dati?.id || resp.dati?.orderId;
+      console.log('[Execution] ✅ Ordine inviato via SDK:', JSON.stringify(resp.dati).slice(0,100));
 
       // Conferma esecuzione
       if (risultato.ordineIdClob) {
         const conferma = await confermaEsecuzione(risultato.ordineIdClob);
+        risultato.stato = conferma.stato;
         if (!conferma.confermato) {
           console.log('[Execution] Ordine non confermato:', conferma.motivo);
-          return { successo: false, motivo: conferma.motivo, risultato };
+        } else {
+          console.log('[Execution] ✅ Ordine CONFERMATO:', conferma.stato);
         }
-        risultato.stato = conferma.stato;
-        console.log('[Execution] ✅ Ordine CONFERMATO:', conferma.stato);
       }
     } else {
       console.log(`[Execution] 📋 Paper trade: ${segnale.asset}/${segnale.finestra} ${segnale.direzione} @${segnale.prezzoContratto}¢ size:$${tradeSize}`);
