@@ -290,7 +290,10 @@ async function fetchPolymarket() {
       for (const item of candidati) {
         try {
           if (fin.slugType === 'hourly') {
-            console.log('[1h] Provo slug:', item.slug);
+            // Log solo ogni 60 tentativi per non spammare
+            if (!fin._logCount) fin._logCount = 0;
+            fin._logCount++;
+            if (fin._logCount % 60 === 1) console.log('[1h] Provo slug:', item.slug);
           }
           const r = await axios.get('https://gamma-api.polymarket.com/markets', {
             params: { slug: item.slug }, timeout: 5000
