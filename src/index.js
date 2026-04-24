@@ -510,6 +510,15 @@ function connettiKraken() {
 }
 
 // ── HTTP Routes ────────────────────────────────────────────
+app.get('/myip', async (req, res) => {
+  try {
+    const r = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
+    res.json({ ip: r.data.ip, timestamp: new Date().toISOString() });
+  } catch(e) {
+    res.json({ errore: e.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
