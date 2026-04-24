@@ -175,6 +175,9 @@ function registraReport(asset, finestra, krakenPrice, polyMkt, score, direzione,
       pnlNetto, polyMkt.volume
     ),
     pnl1k:    pnlNetto ? parseFloat((pnlNetto / 100 * 1000).toFixed(2)) : null,
+    pnlWallet: pnlNetto ? (() => {
+      try { return parseFloat((pnlNetto / 100 * (require('./execution').getWalletBase() * 0.05)).toFixed(2)); } catch(e) { return null; }
+    })() : null,
     closeAt:  polyMkt.closeAt || null,
     esito:    null,
     prezzoFinale:    null,
@@ -207,22 +210,32 @@ async function verificaEsito(entry) {
     const corretta = entry.direzione === 'UP' ? sopra : !sopra;
     entry.direzCorretta = corretta;
 
-    // Notifica Telegram esito
-    const emoji = corretta ? '✅' : '❌';
+    // Messaggio esito operazione
+    const execution = require('./execution');
+    const walletPre = execution.getWalletBase();
+    const tradeSize = walletPre * 0.05;
+    const pnlNettoCents = entry.prezzoContratto ? ((100 - entry.prezzoContratto) - 3) : 0;
     const pnlReale = corretta
-      ? (entry.pnl1k || 0)
-      : -(1000 * (entry.prezzoContratto || 50) / 100);
-
-    const msg = emoji + ' <b>ESITO ' + entry.asset + '/' + entry.finestra.toUpperCase() + '</b>\n\n' +
-      'Direzione: <b>' + entry.direzione + '</b> → ' + (corretta ? '<b>CORRETTA</b>' : '<b>ERRATA</b>') + '\n' +
-      'Price to beat: <b>$' + entry.priceToBeat.toLocaleString('en') + '</b>\n' +
-      'Prezzo finale (Chainlink): <b>$' + prezzoFinale.toLocaleString('en') + '</b>\n' +
-      'Esito mercato: <b>' + entry.esito + '</b>\n' +
-      'P&L reale su $1K: <b>' + (pnlReale >= 0 ? '+' : '') + '$' + Math.abs(pnlReale).toFixed(2) + '</b>\n' +
-      'Score era: <b>' + entry.score + '</b>\n\n' +
-      '⏰ ' + new Date().toUTCString();
-
-    await sendTelegram(msg);
+      ? parseFloat((pnlNettoCents / 100 * tradeSize).toFixed(2))
+      : -parseFloat(tradeSize.toFixed(2));
+    const walletPost = parseFloat((walletPre + pnlReale).toFixed(2));
+    const ordineRef = { direzione: entry.direzione, usdcSpesi: tradeSize, pnlStimato: Math.abs(pnlReale), ordineId: entry.ts };
+    execution.registraEsito(ordineRef, entry.esito);
+    const emoji = corretta ? '✅' : '❌';
+    const titoloEsito = corretta ? 'PROFITTO' : 'PERDITA';
+    const sep = '━━━━━━━━━━━━━━━━━━━━';
+    const msgEsito = [
+      emoji + ' <b>OPERAZIONE CHIUSA — ' + titoloEsito + '</b>',
+      '━━━━━━━━━━━━━━━━━━━━',
+      '📋 ' + entry.asset + '/' + entry.finestra.toUpperCase() + ' · ' + entry.direzione + ' · ' + (entry.prezzoContratto||'—') + '¢',
+      '💰 Investito: <b>$' + tradeSize.toFixed(2) + '</b>',
+      '📤 Esito mercato: <b>' + entry.esito + '</b>',
+      '💵 P&L reale: <b>' + (pnlReale>=0?'+':'') + '$' + Math.abs(pnlReale).toFixed(2) + '</b>',
+      '📈 Wallet: <b>$' + walletPre.toFixed(2) + ' → $' + walletPost.toFixed(2) + '</b>',
+      '━━━━━━━━━━━━━━━━━━━━',
+      new Date().toUTCString()
+    ].join('\n');
+    await sendTelegram(msgEsito);
     console.log('[Esito] ' + entry.asset + '/' + entry.finestra + ' → ' + entry.esito + ' | ' + (corretta ? 'CORRETTA ✓' : 'ERRATA ✗'));
   }
 }
@@ -323,9 +336,7 @@ async function fetchPolymarket() {
                 console.log('[Poly ' + fin.key + '] CAMBIO CONTRATTO → ' + item.slug);
                 // Reset distanza precedente al cambio contratto
                 delete distanzePrecedenti[asset.key + '-' + fin.key];
-                await sendTelegram('🔄 <b>Nuovo contratto ' + asset.key + '/' + fin.key.toUpperCase() + '</b>\n' +
-                  'Slug: ' + item.slug + '\n' +
-                  'Scade in: ' + item.minRimasti.toFixed(1) + ' min');
+                // cambio contratto silenzioso
               }
               lastContractKey[fin.key] = contractKey;
             }
@@ -424,49 +435,37 @@ async function controllaGap() {
 
       // Alert solo se profittevole + volume ok
       if (profittevole && direzione && volumeOk && puoMandareAlert(asset.key + '-' + fin.key + '-' + direzione)) {
-        const emoji = direzione === 'UP' ? '🟢' : '🔴';
-        const momentumStr = momentum !== null
-          ? '\n📊 Momentum: <b>' + (momentum > 0 ? '+' : '') + momentum.toFixed(2) + '$ (' + (
-              distanza > 0 ? (momentum > 0 ? 'sale ancora ↑' : 'rallenta ↓') :
-                             (momentum < 0 ? 'scende ancora ↓' : 'rallenta ↑')
-            ) + ')</b>'
-          : '';
-        const chainlinkStr = chainlinkPrice
-          ? '\n🔗 Chainlink: <b>$' + chainlinkPrice.toLocaleString('en') + '</b>'
-          : '';
-        const msg = emoji + ' <b>SEGNALE ' + asset.key + '/' + fin.key.toUpperCase() + ' — ' + direzione + '</b>\n\n' +
-          '📊 Kraken: <b>$' + assetPrice.toLocaleString('en') + '</b>' + chainlinkStr + '\n' +
-          '🎯 Target: <b>$' + m.priceToBeat.toLocaleString('en') + '</b>\n' +
-          '📏 Distanza: <b>' + (distanza > 0 ? '+' : '') + distanza.toFixed(2) + '$</b>' + momentumStr + '\n' +
-          '⏱ Tempo: <b>' + m.minRimasti.toFixed(1) + ' min</b>\n' +
-          '📈 Score: <b>' + score.toFixed(2) + '</b>\n' +
-          '💰 Contratto ' + direzione + ': <b>' + prezzoC + '¢</b>\n' +
-          '📦 Volume: <b>$' + Math.round(m.volume) + '</b>\n' +
-          '💵 P&L su $1K: <b>+$' + (pnlNetto / 100 * 1000).toFixed(2) + '</b>\n\n' +
-          '⏰ ' + new Date().toUTCString();
-        await sendTelegram(msg);
-
-        // ── ESEGUI ORDINE REALE ───────────────────────────────
         const execution = require('./execution');
         const segnaleExec = {
           asset: asset.key, finestra: fin.key, direzione,
           prezzoContratto: prezzoC, pnlNetto, profittevole,
           slug: m.slug, score: parseFloat(score.toFixed(4)),
           closeAt: m.closeAt || null, volume: m.volume || 0,
-          momentum, distanzaDollar: parseFloat(distanza.toFixed(2))
+          momentum, distanzaDollar: parseFloat(distanza.toFixed(2)),
+          priceToBeat: m.priceToBeat, minRimasti: m.minRimasti
         };
         execution.piazzaOrdine(segnaleExec).then(result => {
-          if (result.successo) {
-            const tipo = result.paperTrade ? 'PAPER' : 'LIVE';
-            console.log('[Execution] ' + tipo + ': ' + asset.key + '/' + fin.key + ' ' + direzione + ' $' + result.usdcSpesi);
-            if (!result.paperTrade) {
-              sendTelegram('✅ <b>ORDINE ESEGUITO</b>\n' + asset.key + '/' + fin.key.toUpperCase() + ' ' + direzione + '\nSize: <b>$' + result.usdcSpesi + '</b>\nP&L stimato: <b>+$' + result.pnlStimato + '</b>');
-            }
-          } else {
+          if (result.successo && !result.paperTrade) {
+            const walletBase = execution.getWalletBase();
+            const msgAperta = [
+              '🟢 <b>ORDINE APERTO — ' + asset.key + '/' + fin.key.toUpperCase() + ' ' + direzione + '</b>',
+              '━━━━━━━━━━━━━━━━━━━━',
+              '💰 Size: <b>$' + result.usdcSpesi + '</b> (5% wallet)',
+              '📈 Contratto ' + direzione + ': <b>' + prezzoC + '¢</b>',
+              '🎯 Target: <b>$' + (m.priceToBeat||0).toLocaleString('en') + '</b>',
+              '📏 Distanza: <b>' + (distanza>0?'+':'') + distanza.toFixed(2) + '$</b>',
+              '📊 Score: <b>' + score.toFixed(2) + '</b>',
+              '⏱ Scade in: <b>' + m.minRimasti.toFixed(1) + ' min</b>',
+              '💵 P&L stimato: <b>+$' + result.pnlStimato + '</b>',
+              '━━━━━━━━━━━━━━━━━━━━',
+              new Date().toUTCString()
+            ].join('\n');
+            sendTelegram(msgAperta);
+            console.log('[Execution] LIVE: ' + asset.key + '/' + fin.key + ' ' + direzione + ' $' + result.usdcSpesi);
+          } else if (!result.successo) {
             console.log('[Execution] Bloccato: ' + result.motivo);
           }
         }).catch(e => console.error('[Execution] Errore:', e.message));
-        // ─────────────────────────────────────────────────────
       }
 
       // Blocco alert se volume insufficiente ma score ok
@@ -568,14 +567,14 @@ app.get('/report/csv', (req, res) => {
   if (!reportData.length) { res.send('Nessun dato'); return; }
   const headers = ['#','timestamp','asset','finestra','kraken_usd','chainlink_usd',
     'price_to_beat','distanza_usd','distanza_chainlink','min_rimasti','score','momentum',
-    'up_cents','down_cents','volume','segnale','pnl_1k_usd','esito','prezzo_finale',
+    'up_cents','down_cents','volume','segnale','pnl_1k_usd','pnl_wallet_usd','esito','prezzo_finale',
     'chainlink_finale','direz_corretta'];
   const rows = reportData.map((r, i) => [
     i+1, r.ts, r.asset, r.finestra,
     r.krakenPrice, r.chainlinkPrice||'', r.priceToBeat||'',
     r.distanza, r.distanzaChainlink||'', r.minRimasti, r.score,
     r.momentum||'', r.prezzoUp, r.prezzoDown, r.volume,
-    r.direzione||'ATTESA', r.pnl1k||'',
+    r.direzione||'ATTESA', r.pnl1k||'', r.pnlWallet||'',
     r.esito||'', r.prezzoFinale||'', r.chainlinkFinale||'',
     r.direzCorretta!==null&&r.direzCorretta!==undefined ? r.direzCorretta : ''
   ].join(','));
@@ -637,6 +636,21 @@ app.post('/report/send', async (req, res) => {
   res.json({ ok: true, righe: reportData.length });
 });
 
+app.get('/execution/derive-creds', async (req, res) => {
+  // Endpoint temporaneo per derivare API credentials — RIMUOVERE DOPO USO
+  const execution = require('./execution');
+  try {
+    const creds = await execution.derivaCredentials();
+    if (creds) {
+      res.json({ ok: true, apiKey: creds.apiKey, secret: creds.secret, passphrase: creds.passphrase });
+    } else {
+      res.json({ ok: false, errore: 'Credentials non derivabili' });
+    }
+  } catch(e) {
+    res.json({ ok: false, errore: e.message });
+  }
+});
+
 app.post('/test-alert', async (req, res) => {
   await sendTelegram('🧪 <b>Test sistema</b>\n\nTutti i moduli operativi:\n✅ Kraken WebSocket\n✅ Polymarket CLOB\n✅ Chainlink price\n✅ Momentum tracking\n✅ Verifica esiti\n✅ Alert Telegram\n✅ Execution engine (paper)');
   res.json({ ok: true });
@@ -685,11 +699,43 @@ async function inviaCsvTelegram(motivo) {
     const a          = reportData[reportData.length-1]?.ts?.slice(11,19) || '—';
 
     const filename = 'report_' + new Date().toISOString().slice(0,16).replace('T','_').replace(':','-') + '.csv';
-    const caption = (motivo||'⏱ Backup orario') + '\n\n' +
-      '📊 <b>' + reportData.length + ' righe</b> | ' + da + ' → ' + a + ' UTC\n' +
-      '🎯 Segnali: ' + segnali.length + ' | WR: <b>' + winRate + '%</b>\n' +
-      '📈 Score max: ' + maxScore + '\n' +
-      '💰 P&L stimato: $' + totPnl.toFixed(2);
+    // Stats ultima ora
+    const unaOraFa = Date.now() - 3600000;
+    const reportUltimaOra = reportData.filter(r => new Date(r.ts).getTime() > unaOraFa);
+    const segnaliOra = reportUltimaOra.filter(r => r.direzione);
+    const verificatiOra = reportUltimaOra.filter(r => r.esito && r.direzione);
+    const correttiOra = verificatiOra.filter(r => r.direzCorretta === true);
+    const wrOra = verificatiOra.length ? (correttiOra.length/verificatiOra.length*100).toFixed(1) : 'N/A';
+
+    // Stats totali da avvio
+    const execution = require('./execution');
+    const statoExe = execution.getStato();
+    const walletAttuale = statoExe.walletStimato || 100;
+    const pnlTotale = (walletAttuale - 100).toFixed(2);
+    const startTime = reportData.length ? reportData[0].ts.slice(0,16).replace('T',' ') : '—';
+
+    // P&L ultima ora stimato
+    const pnlOra = segnaliOra.reduce((s,r) => s+(r.pnlWallet||r.pnl1k/1000*5||0), 0);
+
+    const caption = '📊 <b>REPORT ORARIO — ' + new Date().toUTCString().slice(17,22) + ' UTC</b>\n' +
+      '━━━━━━━━━━━━━━━━━━━━\n' +
+      '<b>ULTIMA ORA</b>\n' +
+      '🔢 Operazioni: <b>' + segnaliOra.length + '</b>\n' +
+      '✅ Vincenti: <b>' + correttiOra.length + '</b>\n' +
+      '❌ Perdenti: <b>' + (verificatiOra.length - correttiOra.length) + '</b>\n' +
+      '📈 Win rate: <b>' + wrOra + '%</b>\n' +
+      '💵 P&L ora: <b>' + (pnlOra>=0?'+':'') + '$' + Math.abs(pnlOra).toFixed(2) + '</b>\n' +
+      '━━━━━━━━━━━━━━━━━━━━\n' +
+      '<b>DA AVVIO SOFTWARE</b>\n' +
+      '🔢 Operazioni totali: <b>' + segnali.length + '</b>\n' +
+      '✅ Vincenti: <b>' + corretti.length + '</b>\n' +
+      '❌ Perdenti: <b>' + (verificati.length - corretti.length) + '</b>\n' +
+      '📈 Win rate totale: <b>' + winRate + '%</b>\n' +
+      '💰 Wallet: <b>$100.00 → $' + walletAttuale.toFixed(2) + '</b>\n' +
+      '💵 P&L totale: <b>' + (pnlTotale>=0?'+':'') + '$' + Math.abs(pnlTotale) + '</b>\n' +
+      '📅 Attivo da: <b>' + startTime + ' UTC</b>\n' +
+      '━━━━━━━━━━━━━━━━━━━━\n' +
+      '📎 CSV allegato · ' + reportData.length + ' righe';
 
     // Multipart form-data built-in (Node 18+)
     const boundary = '----FormBoundary' + Date.now();
