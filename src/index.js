@@ -219,8 +219,11 @@ async function verificaEsito(entry) {
       ? parseFloat((pnlNettoCents / 100 * tradeSize).toFixed(2))
       : -parseFloat(tradeSize.toFixed(2));
     const walletPost = parseFloat((walletPre + pnlReale).toFixed(2));
-    const ordineRef = { direzione: entry.direzione, usdcSpesi: tradeSize, pnlStimato: Math.abs(pnlReale), ordineId: entry.ts };
-    execution.registraEsito(ordineRef, entry.esito);
+    // Registra esito e invia alert SOLO se l'ordine era reale (ha ordineIdClob)
+    if (entry.ordineIdClob) {
+      const ordineRef = { direzione: entry.direzione, usdcSpesi: tradeSize, pnlStimato: Math.abs(pnlReale), ordineId: entry.ordineIdClob };
+      execution.registraEsito(ordineRef, entry.esito);
+    }
     const emoji = corretta ? '✅' : '❌';
     const titoloEsito = corretta ? 'PROFITTO' : 'PERDITA';
     const sep = '━━━━━━━━━━━━━━━━━━━━';
@@ -446,6 +449,9 @@ async function controllaGap() {
         };
         execution.piazzaOrdine(segnaleExec).then(result => {
           if (result.successo && !result.paperTrade) {
+            // Salva ordineIdClob nell'entry del report per verificaEsito
+            const entryCorrente = reportData[reportData.length - 1];
+            if (entryCorrente) entryCorrente.ordineIdClob = result.ordineIdClob || result.ordineId || 'live-' + Date.now();
             const walletBase = execution.getWalletBase();
             const msgAperta = [
               '🟢 <b>ORDINE APERTO — ' + asset.key + '/' + fin.key.toUpperCase() + ' ' + direzione + '</b>',
