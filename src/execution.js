@@ -315,26 +315,26 @@ async function piazzaOrdine(segnale) {
     if (TRADING_ENABLED && wallet) {
       console.log(`[Execution] 🔴 LIVE ORDER — ${segnale.finestra} ${segnale.direzione} @${segnale.prezzoContratto}¢ size:$${tradeSize}`);
 
-      // ── Chiamata diretta CLOB API con HMAC + EIP-712 ────
+      // ── Chiamata diretta CLOB API: createOrder + postOrder ──
       const crypto     = require('crypto');
       const apiKey     = process.env.POLY_API_KEY;
       const secret     = process.env.POLY_SECRET;
       const passphrase = process.env.POLY_PASSPHRASE;
       const funder     = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
+
       if (!apiKey || !secret || !passphrase) {
         return { successo: false, motivo: 'POLY_API_KEY/SECRET/PASSPHRASE mancanti' };
       }
 
       const prezzoDecimale = parseFloat((segnale.prezzoContratto / 100).toFixed(4));
-      const ts             = Math.floor(Date.now() / 1000).toString();
+      const ts = Math.floor(Date.now() / 1000).toString();
 
-      // Firma HMAC-SHA256 per autenticazione L2 — include body
-      // buildPolyHmacSignature: HMAC(secret, timestamp + method + path + body)
-      // HMAC calcolato dopo costruzione payload
-
-      // Struttura ordine per firma EIP-712
+      // Step 1: Costruisci ordine firmato EIP-712
+      // Domain Polymarket CTF Exchange su Polygon
       const domain = {
-        name: 'ClobAuthDomain', version: '1', chainId: CHAIN_ID,
+        name: 'ClobAuthDomain',
+        version: '1',
+        chainId: CHAIN_ID,
         verifyingContract: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'
       };
       const types = { Order: [
@@ -355,37 +355,58 @@ async function piazzaOrdine(segnale) {
       const salt     = ethers.BigNumber.from(ethers.utils.randomBytes(32)).mod(ethers.BigNumber.from('10000000000000000'));
       const makerAmt = ethers.BigNumber.from(Math.round(tradeSize * 1e6).toString());
       const takerAmt = ethers.BigNumber.from(Math.round(size * 1e6).toString());
-      const expir    = ethers.BigNumber.from(Math.floor(Date.now()/1000 + 3600).toString());
+      const expir    = ethers.BigNumber.from(Math.floor(Date.now()/1000 + 7200).toString());
+
+      // signatureType=1 per browser wallet proxy (Phantom connesso a Polymarket)
+      // signatureType=0 per EOA diretto, signatureType=2 per Gnosis Safe
+      const SIG_TYPE = 1;
 
       const ordineStruct = {
-        salt, maker: funder, signer: wallet.address,
-        taker: '0x0000000000000000000000000000000000000000',
-        tokenId: ethers.BigNumber.from(tokenId),
-        makerAmount: makerAmt, takerAmount: takerAmt,
-        expiration: expir, nonce: ethers.BigNumber.from(0),
-        feeRateBps: ethers.BigNumber.from(0), side: 0, signatureType: 2
+        salt,
+        maker:         funder,      // proxy address che detiene i fondi
+        signer:        wallet.address, // EOA che firma
+        taker:         '0x0000000000000000000000000000000000000000',
+        tokenId:       ethers.BigNumber.from(tokenId),
+        makerAmount:   makerAmt,
+        takerAmount:   takerAmt,
+        expiration:    expir,
+        nonce:         ethers.BigNumber.from(0),
+        feeRateBps:    ethers.BigNumber.from(0),
+        side:          0, // BUY
+        signatureType: SIG_TYPE,
       };
 
       const firma = await wallet._signTypedData(domain, types, ordineStruct);
       console.log('[Execution] Firma EIP-712:', firma.slice(0,20)+'...');
 
+      // Step 2: Payload ordine completo
       const payload = {
         order: {
-          salt: salt.toString(), maker: funder, signer: wallet.address,
-          taker: '0x0000000000000000000000000000000000000000',
-          tokenId, makerAmount: makerAmt.toString(), takerAmount: takerAmt.toString(),
-          expiration: expir.toString(), nonce: '0', feeRateBps: '0',
-          side: 'BUY', signatureType: 2, signature: firma
+          salt:          salt.toString(),
+          maker:         funder,
+          signer:        wallet.address,
+          taker:         '0x0000000000000000000000000000000000000000',
+          tokenId:       tokenId,
+          makerAmount:   makerAmt.toString(),
+          takerAmount:   takerAmt.toString(),
+          expiration:    expir.toString(),
+          nonce:         '0',
+          feeRateBps:    '0',
+          side:          'BUY',
+          signatureType: SIG_TYPE,
+          signature:     firma
         },
-        owner: funder, orderType: 'GTC'
+        owner:     funder,
+        orderType: 'GTC'
       };
 
-      // Calcola HMAC sul body reale: HMAC(secret, timestamp + method + path + body)
+      // Step 3: HMAC-SHA256 su timestamp + method + path + body
       const bodyStr  = JSON.stringify(payload);
       const hmacSig  = crypto.createHmac('sha256', Buffer.from(secret, 'base64'))
                              .update(ts + 'POST' + '/order' + bodyStr).digest('base64');
 
       console.log('[Execution] HMAC sig:', hmacSig.slice(0,20)+'...');
+      console.log('[Execution] tokenId:', tokenId.slice(0,20)+'...', '| price:', prezzoDecimale, '| size:', size);
 
       const risposta = await chiamataConRetry(
         () => axios.post(CLOB_HOST + '/order', payload, {
@@ -403,7 +424,7 @@ async function piazzaOrdine(segnale) {
       );
 
       risultato.ordineIdClob = risposta.dati?.orderID || risposta.dati?.id || risposta.dati?.orderId;
-      console.log('[Execution] ✅ Risposta CLOB:', JSON.stringify(risposta.dati).slice(0,150));
+      console.log('[Execution] ✅ Risposta CLOB:', JSON.stringify(risposta.dati).slice(0,200));
 
       if (risultato.ordineIdClob) {
         const conferma = await confermaEsecuzione(risultato.ordineIdClob);
