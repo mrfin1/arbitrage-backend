@@ -91,42 +91,22 @@ async function getClobClient() {
 
   console.log('[Execution] Env creds:', apiKey ? 'apiKey OK' : 'apiKey MANCANTE', secret ? 'secret OK' : 'secret MANCANTE', passphrase ? 'passphrase OK' : 'passphrase MANCANTE');
   if (apiKey && secret && passphrase) {
-    try {
-      _clobCreds = { key: apiKey, apiKey, secret, passphrase }; // supporta entrambi i formati
-      // Prova signatureType 2 (Gnosis Safe proxy) poi 0 (EOA)
-      for (const sigType of [2, 0]) {
-        const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, _clobCreds, sigType, funder);
-        if (typeof client.createAndPostOrder === 'function') {
-          _clobClient = client;
-          console.log('[Execution] ClobClient pronto (env creds) | sigType:', sigType);
-          return _clobClient;
-        }
-      }
-    } catch(e) {
-      console.error('[Execution] ClobClient env creds errore:', e.message?.slice(0,80));
-    }
-  }
-
-  // Fallback: deriva credentials on-the-fly
-  console.log('[Execution] Derivo credentials on-the-fly...');
-  for (const sigType of [2, 0]) {
-    try {
-      const l1    = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, undefined, sigType, funder);
-      const creds = await l1.createOrDeriveApiKey();
-      if (!creds?.key && !creds?.apiKey) continue;
-      _clobCreds  = creds;
-      const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds, sigType, funder);
-      if (typeof client.createAndPostOrder === 'function') {
-        _clobClient = client;
-        console.log('[Execution] ClobClient pronto (derivato) | sigType:', sigType);
+    // Prova signatureType 2 (Gnosis Safe) poi 0 (EOA) — senza check createAndPostOrder
+    for (const sigType of [2, 0]) {
+      try {
+        const creds  = { key: apiKey, secret, passphrase };
+        const client = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds, sigType, funder);
+        _clobCreds   = creds;
+        _clobClient  = client;
+        console.log('[Execution] ClobClient pronto (env creds) sigType:', sigType);
         return _clobClient;
+      } catch(e) {
+        console.log('[Execution] sigType', sigType, 'errore:', e.message?.slice(0,80));
       }
-    } catch(e) {
-      console.log('[Execution] sigType', sigType, 'errore:', e.message?.slice(0,80));
     }
   }
 
-  console.error('[Execution] ClobClient non inizializzabile');
+  console.error('[Execution] ClobClient non inizializzabile — POLY_API_KEY mancante o non valida');
   return null;
 }
 
@@ -335,51 +315,94 @@ async function piazzaOrdine(segnale) {
     if (TRADING_ENABLED && wallet) {
       console.log(`[Execution] 🔴 LIVE ORDER — ${segnale.finestra} ${segnale.direzione} @${segnale.prezzoContratto}¢ size:$${tradeSize}`);
 
-      // Usa ClobClient ufficiale Polymarket
-      const client = await getClobClient();
-      if (!client) return { successo: false, motivo: 'ClobClient non inizializzato' };
+      // ── Chiamata diretta CLOB API con HMAC + EIP-712 ────
+      const crypto     = require('crypto');
+      const apiKey     = process.env.POLY_API_KEY;
+      const secret     = process.env.POLY_SECRET;
+      const passphrase = process.env.POLY_PASSPHRASE;
+      const funder     = process.env.POLYMARKET_PROXY_ADDRESS || wallet.address;
+      if (!apiKey || !secret || !passphrase) {
+        return { successo: false, motivo: 'POLY_API_KEY/SECRET/PASSPHRASE mancanti' };
+      }
 
-      const lato = segnale.direzione === 'UP' ? Side.BUY : Side.BUY; // compra sempre il lato corretto
       const prezzoDecimale = parseFloat((segnale.prezzoContratto / 100).toFixed(4));
+      const ts             = Math.floor(Date.now() / 1000).toString();
 
-      // Crea e invia ordine GTC tramite SDK ufficiale
-      // Ottieni tick size reale per questo mercato
-      let tickSize = '0.01';
-      try {
-        const ts = await client.getTickSize(tokenId);
-        if (ts) tickSize = ts;
-      } catch(e) {}
-      console.log('[Execution] tokenId:', tokenId.slice(0,20), '| price:', prezzoDecimale, '| size:', size, '| tickSize:', tickSize);
+      // Firma HMAC-SHA256 per autenticazione L2
+      const hmacSig = crypto.createHmac('sha256', Buffer.from(secret, 'base64'))
+                            .update(ts + 'POST' + '/order').digest('base64');
 
-      const resp = await chiamataConRetry(
-        () => client.createAndPostOrder(
-          {
-            tokenID:    tokenId,
-            price:      prezzoDecimale,
-            size:       size,
-            side:       Side.BUY,
-            feeRateBps: 0,
-            expiration: 0,
-            taker:      '0x0000000000000000000000000000000000000000'
+      // Struttura ordine per firma EIP-712
+      const domain = {
+        name: 'ClobAuthDomain', version: '1', chainId: CHAIN_ID,
+        verifyingContract: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'
+      };
+      const types = { Order: [
+        { name: 'salt',          type: 'uint256' },
+        { name: 'maker',         type: 'address' },
+        { name: 'signer',        type: 'address' },
+        { name: 'taker',         type: 'address' },
+        { name: 'tokenId',       type: 'uint256' },
+        { name: 'makerAmount',   type: 'uint256' },
+        { name: 'takerAmount',   type: 'uint256' },
+        { name: 'expiration',    type: 'uint256' },
+        { name: 'nonce',         type: 'uint256' },
+        { name: 'feeRateBps',    type: 'uint256' },
+        { name: 'side',          type: 'uint8'   },
+        { name: 'signatureType', type: 'uint8'   },
+      ]};
+
+      const salt     = ethers.BigNumber.from(ethers.utils.randomBytes(32)).mod(ethers.BigNumber.from('10000000000000000'));
+      const makerAmt = ethers.BigNumber.from(Math.round(tradeSize * 1e6).toString());
+      const takerAmt = ethers.BigNumber.from(Math.round(size * 1e6).toString());
+      const expir    = ethers.BigNumber.from(Math.floor(Date.now()/1000 + 3600).toString());
+
+      const ordineStruct = {
+        salt, maker: funder, signer: wallet.address,
+        taker: '0x0000000000000000000000000000000000000000',
+        tokenId: ethers.BigNumber.from(tokenId),
+        makerAmount: makerAmt, takerAmount: takerAmt,
+        expiration: expir, nonce: ethers.BigNumber.from(0),
+        feeRateBps: ethers.BigNumber.from(0), side: 0, signatureType: 2
+      };
+
+      const firma = await wallet._signTypedData(domain, types, ordineStruct);
+      console.log('[Execution] Firma EIP-712:', firma.slice(0,20)+'...');
+
+      const payload = {
+        order: {
+          salt: salt.toString(), maker: funder, signer: wallet.address,
+          taker: '0x0000000000000000000000000000000000000000',
+          tokenId, makerAmount: makerAmt.toString(), takerAmount: takerAmt.toString(),
+          expiration: expir.toString(), nonce: '0', feeRateBps: '0',
+          side: 'BUY', signatureType: 2, signature: firma
+        },
+        owner: funder, orderType: 'GTC'
+      };
+
+      const risposta = await chiamataConRetry(
+        () => axios.post(CLOB_HOST + '/order', payload, {
+          headers: {
+            'Content-Type':    'application/json',
+            'POLY_ADDRESS':    wallet.address,
+            'POLY_SIGNATURE':  hmacSig,
+            'POLY_TIMESTAMP':  ts,
+            'POLY_API_KEY':    apiKey,
+            'POLY_PASSPHRASE': passphrase
           },
-          { tickSize, negRisk: false },
-          OrderType.GTC
-        ),
+          timeout: 10000
+        }),
         3, ordineId
       );
 
-      risultato.ordineIdClob = resp.dati?.orderID || resp.dati?.id || resp.dati?.orderId;
-      console.log('[Execution] ✅ Ordine inviato via SDK:', JSON.stringify(resp.dati).slice(0,100));
+      risultato.ordineIdClob = risposta.dati?.orderID || risposta.dati?.id || risposta.dati?.orderId;
+      console.log('[Execution] ✅ Risposta CLOB:', JSON.stringify(risposta.dati).slice(0,150));
 
-      // Conferma esecuzione
       if (risultato.ordineIdClob) {
         const conferma = await confermaEsecuzione(risultato.ordineIdClob);
         risultato.stato = conferma.stato;
-        if (!conferma.confermato) {
-          console.log('[Execution] Ordine non confermato:', conferma.motivo);
-        } else {
-          console.log('[Execution] ✅ Ordine CONFERMATO:', conferma.stato);
-        }
+        if (!conferma.confermato) console.log('[Execution] Non confermato:', conferma.motivo);
+        else console.log('[Execution] ✅ CONFERMATO:', conferma.stato);
       }
     } else {
       console.log(`[Execution] 📋 Paper trade: ${segnale.asset}/${segnale.finestra} ${segnale.direzione} @${segnale.prezzoContratto}¢ size:$${tradeSize}`);
