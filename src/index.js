@@ -510,6 +510,51 @@ function connettiKraken() {
 }
 
 // ── HTTP Routes ────────────────────────────────────────────
+app.get('/setup/register-wallet', async (req, res) => {
+  // Registra nuovo wallet su Polymarket CLOB API dal server USA
+  // Chiamare UNA SOLA VOLTA dopo aver impostato WALLET_PRIVATE_KEY nuovo
+  try {
+    const { ethers } = require('ethers');
+    const { ClobClient } = require('@polymarket/clob-client');
+    const privKey = process.env.WALLET_PRIVATE_KEY;
+    const funder  = process.env.POLYMARKET_PROXY_ADDRESS;
+    if (!privKey) return res.json({ ok: false, errore: 'WALLET_PRIVATE_KEY mancante' });
+
+    const wallet = new ethers.Wallet(privKey);
+    console.log('[Setup] Registro wallet:', wallet.address, '| server IP USA');
+
+    // Prova registrazione con sigType 0 e 2
+    let creds = null;
+    for (const sigType of [0, 2]) {
+      try {
+        const client = new ClobClient('https://clob.polymarket.com', 137, wallet, undefined, sigType, funder || wallet.address);
+        creds = await client.createOrDeriveApiKey();
+        if (creds?.key || creds?.apiKey) {
+          console.log('[Setup] ✅ Credentials create sigType', sigType, ':', (creds.key||creds.apiKey).slice(0,8)+'...');
+          break;
+        }
+      } catch(e) {
+        console.log('[Setup] sigType', sigType, ':', e.message?.slice(0,80));
+      }
+    }
+
+    if (!creds?.key && !creds?.apiKey) {
+      return res.json({ ok: false, errore: 'Impossibile creare credentials — wallet non ancora registrato su polymarket.com?' });
+    }
+
+    res.json({
+      ok: true,
+      walletAddress: wallet.address,
+      apiKey:     creds.key    || creds.apiKey,
+      secret:     creds.secret,
+      passphrase: creds.passphrase,
+      messaggio:  'Copia questi valori nelle variabili Railway: POLY_API_KEY, POLY_SECRET, POLY_PASSPHRASE'
+    });
+  } catch(e) {
+    res.json({ ok: false, errore: e.message });
+  }
+});
+
 app.get('/myip', async (req, res) => {
   try {
     const r = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
