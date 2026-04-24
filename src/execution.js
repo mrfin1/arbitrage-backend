@@ -315,7 +315,6 @@ async function piazzaOrdine(segnale) {
     if (TRADING_ENABLED && wallet) {
       console.log(`[Execution] 🔴 LIVE ORDER — ${segnale.finestra} ${segnale.direzione} @${segnale.prezzoContratto}¢ size:$${tradeSize}`);
 
-      // ── Chiamata diretta CLOB API: createOrder + postOrder ──
       const crypto     = require('crypto');
       const apiKey     = process.env.POLY_API_KEY;
       const secret     = process.env.POLY_SECRET;
@@ -327,10 +326,8 @@ async function piazzaOrdine(segnale) {
       }
 
       const prezzoDecimale = parseFloat((segnale.prezzoContratto / 100).toFixed(4));
-      const ts = Math.floor(Date.now() / 1000).toString();
 
-      // Step 1: Costruisci ordine firmato EIP-712
-      // Domain Polymarket CTF Exchange su Polygon
+      // Domain CTF Exchange Polygon
       const domain = {
         name: 'ClobAuthDomain',
         version: '1',
@@ -357,74 +354,87 @@ async function piazzaOrdine(segnale) {
       const takerAmt = ethers.BigNumber.from(Math.round(size * 1e6).toString());
       const expir    = ethers.BigNumber.from(Math.floor(Date.now()/1000 + 7200).toString());
 
-      // signatureType=1 per browser wallet proxy (Phantom connesso a Polymarket)
-      // signatureType=0 per EOA diretto, signatureType=2 per Gnosis Safe
-      const SIG_TYPE = 1;
+      // Prova tutti e 3 i signatureType in sequenza fino a successo
+      let risposta = null;
+      let ultimoErrore = null;
 
-      const ordineStruct = {
-        salt,
-        maker:         funder,      // proxy address che detiene i fondi
-        signer:        wallet.address, // EOA che firma
-        taker:         '0x0000000000000000000000000000000000000000',
-        tokenId:       ethers.BigNumber.from(tokenId),
-        makerAmount:   makerAmt,
-        takerAmount:   takerAmt,
-        expiration:    expir,
-        nonce:         ethers.BigNumber.from(0),
-        feeRateBps:    ethers.BigNumber.from(0),
-        side:          0, // BUY
-        signatureType: SIG_TYPE,
-      };
+      for (const SIG_TYPE of [0, 1, 2]) {
+        try {
+          const ordineStruct = {
+            salt,
+            maker:         SIG_TYPE === 0 ? wallet.address : funder,
+            signer:        wallet.address,
+            taker:         '0x0000000000000000000000000000000000000000',
+            tokenId:       ethers.BigNumber.from(tokenId),
+            makerAmount:   makerAmt,
+            takerAmount:   takerAmt,
+            expiration:    expir,
+            nonce:         ethers.BigNumber.from(0),
+            feeRateBps:    ethers.BigNumber.from(0),
+            side:          0,
+            signatureType: SIG_TYPE,
+          };
 
-      const firma = await wallet._signTypedData(domain, types, ordineStruct);
-      console.log('[Execution] Firma EIP-712:', firma.slice(0,20)+'...');
+          const firma = await wallet._signTypedData(domain, types, ordineStruct);
 
-      // Step 2: Payload ordine completo
-      const payload = {
-        order: {
-          salt:          salt.toString(),
-          maker:         funder,
-          signer:        wallet.address,
-          taker:         '0x0000000000000000000000000000000000000000',
-          tokenId:       tokenId,
-          makerAmount:   makerAmt.toString(),
-          takerAmount:   takerAmt.toString(),
-          expiration:    expir.toString(),
-          nonce:         '0',
-          feeRateBps:    '0',
-          side:          'BUY',
-          signatureType: SIG_TYPE,
-          signature:     firma
-        },
-        owner:     funder,
-        orderType: 'GTC'
-      };
+          const payload = {
+            order: {
+              salt:          salt.toString(),
+              maker:         SIG_TYPE === 0 ? wallet.address : funder,
+              signer:        wallet.address,
+              taker:         '0x0000000000000000000000000000000000000000',
+              tokenId:       tokenId,
+              makerAmount:   makerAmt.toString(),
+              takerAmount:   takerAmt.toString(),
+              expiration:    expir.toString(),
+              nonce:         '0',
+              feeRateBps:    '0',
+              side:          'BUY',
+              signatureType: SIG_TYPE,
+              signature:     firma
+            },
+            owner:     SIG_TYPE === 0 ? wallet.address : funder,
+            orderType: 'GTC'
+          };
 
-      // Step 3: HMAC-SHA256 su timestamp + method + path + body
-      const bodyStr  = JSON.stringify(payload);
-      const hmacSig  = crypto.createHmac('sha256', Buffer.from(secret, 'base64'))
-                             .update(ts + 'POST' + '/order' + bodyStr).digest('base64');
+          const ts      = Math.floor(Date.now() / 1000).toString();
+          const bodyStr = JSON.stringify(payload);
+          const hmacSig = crypto.createHmac('sha256', Buffer.from(secret, 'base64'))
+                                .update(ts + 'POST' + '/order' + bodyStr).digest('base64');
 
-      console.log('[Execution] HMAC sig:', hmacSig.slice(0,20)+'...');
-      console.log('[Execution] tokenId:', tokenId.slice(0,20)+'...', '| price:', prezzoDecimale, '| size:', size);
+          console.log(`[Execution] Provo signatureType=${SIG_TYPE} | maker=${payload.order.maker.slice(0,10)}...`);
 
-      const risposta = await chiamataConRetry(
-        () => axios.post(CLOB_HOST + '/order', payload, {
-          headers: {
-            'Content-Type':    'application/json',
-            'POLY_ADDRESS':    wallet.address,
-            'POLY_SIGNATURE':  hmacSig,
-            'POLY_TIMESTAMP':  ts,
-            'POLY_API_KEY':    apiKey,
-            'POLY_PASSPHRASE': passphrase
-          },
-          timeout: 10000
-        }),
-        3, ordineId
-      );
+          const r = await axios.post(CLOB_HOST + '/order', payload, {
+            headers: {
+              'Content-Type':    'application/json',
+              'POLY_ADDRESS':    wallet.address,
+              'POLY_SIGNATURE':  hmacSig,
+              'POLY_TIMESTAMP':  ts,
+              'POLY_API_KEY':    apiKey,
+              'POLY_PASSPHRASE': passphrase
+            },
+            timeout: 10000
+          });
 
-      risultato.ordineIdClob = risposta.dati?.orderID || risposta.dati?.id || risposta.dati?.orderId;
-      console.log('[Execution] ✅ Risposta CLOB:', JSON.stringify(risposta.dati).slice(0,200));
+          risposta = r.data;
+          console.log(`[Execution] ✅ signatureType=${SIG_TYPE} funziona!`);
+          break; // trovato il tipo giusto — esci dal loop
+
+        } catch(e) {
+          const status = e.response?.status;
+          const msg    = e.response?.data?.error || e.message;
+          console.log(`[Execution] signatureType=${SIG_TYPE} → ${status} ${msg?.slice(0,80)}`);
+          ultimoErrore = e;
+          continue; // prova il prossimo
+        }
+      }
+
+      if (!risposta) {
+        throw ultimoErrore || new Error('Tutti i signatureType falliti');
+      }
+
+      risultato.ordineIdClob = risposta?.orderID || risposta?.id || risposta?.orderId;
+      console.log('[Execution] ✅ Risposta CLOB:', JSON.stringify(risposta).slice(0,200));
 
       if (risultato.ordineIdClob) {
         const conferma = await confermaEsecuzione(risultato.ordineIdClob);
