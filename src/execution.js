@@ -328,9 +328,9 @@ async function piazzaOrdine(segnale) {
       const prezzoDecimale = parseFloat((segnale.prezzoContratto / 100).toFixed(4));
       const ts             = Math.floor(Date.now() / 1000).toString();
 
-      // Firma HMAC-SHA256 per autenticazione L2
-      const hmacSig = crypto.createHmac('sha256', Buffer.from(secret, 'base64'))
-                            .update(ts + 'POST' + '/order').digest('base64');
+      // Firma HMAC-SHA256 per autenticazione L2 — include body
+      // buildPolyHmacSignature: HMAC(secret, timestamp + method + path + body)
+      // HMAC calcolato dopo costruzione payload
 
       // Struttura ordine per firma EIP-712
       const domain = {
@@ -379,6 +379,13 @@ async function piazzaOrdine(segnale) {
         },
         owner: funder, orderType: 'GTC'
       };
+
+      // Calcola HMAC sul body reale: HMAC(secret, timestamp + method + path + body)
+      const bodyStr  = JSON.stringify(payload);
+      const hmacSig  = crypto.createHmac('sha256', Buffer.from(secret, 'base64'))
+                             .update(ts + 'POST' + '/order' + bodyStr).digest('base64');
+
+      console.log('[Execution] HMAC sig:', hmacSig.slice(0,20)+'...');
 
       const risposta = await chiamataConRetry(
         () => axios.post(CLOB_HOST + '/order', payload, {
