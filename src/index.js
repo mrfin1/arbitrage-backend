@@ -447,6 +447,10 @@ async function controllaGap() {
           momentum, distanzaDollar: parseFloat(distanza.toFixed(2)),
           priceToBeat: m.priceToBeat, minRimasti: m.minRimasti
         };
+        // Aggiungi segnale alla coda per executor locale Mac
+        segnaliPendenti.push({ ...segnaleExec, tradeSize: (execution.getWalletBase() * 0.05).toFixed(2) });
+        if (segnaliPendenti.length > 10) segnaliPendenti.shift(); // max 10 pendenti
+
         execution.piazzaOrdine(segnaleExec).then(result => {
           if (result.successo && !result.paperTrade) {
             // Salva ordineIdClob nell'entry del report per verificaEsito
@@ -660,6 +664,24 @@ app.get('/execution/saldo', async (req, res) => {
   }
 });
 
+// ── Endpoint per executor locale Mac ─────────────────────
+let segnaliPendenti = [];
+let ultimoSegnaleInviato = null;
+
+app.get('/execution/segnali-pendenti', (req, res) => {
+  const pending = segnaliPendenti.splice(0); // svuota e restituisce
+  res.json({ segnali: pending, timestamp: new Date().toISOString() });
+});
+
+app.post('/execution/ordine-locale', express.json(), (req, res) => {
+  const { segnale, ordineId, timestamp } = req.body;
+  console.log('[LocalExec] ✅ Ordine eseguito dal Mac:', ordineId, segnale?.asset, segnale?.finestra, segnale?.direzione);
+  // Salva nel report
+  const entry = reportData[reportData.length - 1];
+  if (entry) entry.ordineIdClob = ordineId;
+  res.json({ ok: true });
+});
+
 app.get('/execution/dashboard', (req, res) => {
   const execution = require('./execution');
   res.json(execution.getDashboardData());
@@ -668,13 +690,14 @@ app.get('/execution/dashboard', (req, res) => {
 app.post('/execution/test', async (req, res) => {
   const execution = require('./execution');
   // Usa il contratto 15M attualmente attivo per il test
-  const m15 = polyMarkets['15m'] && polyMarkets['15m']['BTC'];
+  // Usa sempre 1H per il test — più volume e più stabile
   const m1h = polyMarkets['1h'] && polyMarkets['1h']['BTC'];
-  const mercato = m15 || m1h;
+  const m15 = polyMarkets['15m'] && polyMarkets['15m']['BTC'];
+  const mercato = m1h || m15;
   if (!mercato) {
     return res.json({ successo: false, motivo: 'Nessun contratto attivo al momento' });
   }
-  const finestra = m15 ? '15m' : '1h';
+  const finestra = m1h ? '1h' : '15m';
   const direzione = 'UP';
   const prezzoC = mercato.prezzoUp;
   const pnlNetto = parseFloat(((100 - prezzoC) - 3).toFixed(2));
