@@ -411,7 +411,11 @@ async function piazzaOrdine(segnale) {
               'POLY_SIGNATURE':  hmacSig,
               'POLY_TIMESTAMP':  ts,
               'POLY_API_KEY':    apiKey,
-              'POLY_PASSPHRASE': passphrase
+              'POLY_PASSPHRASE': passphrase,
+              'User-Agent':      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Origin':          'https://polymarket.com',
+              'Referer':         'https://polymarket.com/',
+              'Accept-Language': 'en-US,en;q=0.9',
             },
             timeout: 10000
           });
