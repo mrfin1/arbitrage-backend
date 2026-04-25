@@ -21,6 +21,11 @@
  */
 
 const axios  = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
+// Proxy residenziale USA per bypassare blocco geografico Polymarket
+const PROXY_URL = process.env.PROXY_URL || 'http://htsekxoj:lcxw5qv1s3o6@104.239.107.47:5699';
+const proxyAgent = new HttpsProxyAgent(PROXY_URL);
 const { ethers } = require('ethers'); // v5
 const { ClobClient, Side, OrderType } = require('@polymarket/clob-client');
 
@@ -404,7 +409,10 @@ async function piazzaOrdine(segnale) {
 
           console.log(`[Execution] Provo signatureType=${SIG_TYPE} | maker=${payload.order.maker.slice(0,10)}...`);
 
+          console.log('[Execution] Usando proxy residenziale USA:', PROXY_URL.split('@')[1]);
           const r = await axios.post(CLOB_HOST + '/order', payload, {
+            httpsAgent: proxyAgent,
+            proxy: false, // disabilita proxy env vars, usa httpsAgent
             headers: {
               'Content-Type':    'application/json',
               'POLY_ADDRESS':    wallet.address,
@@ -417,7 +425,7 @@ async function piazzaOrdine(segnale) {
               'Referer':         'https://polymarket.com/',
               'Accept-Language': 'en-US,en;q=0.9',
             },
-            timeout: 10000
+            timeout: 15000
           });
 
           risposta = r.data;
