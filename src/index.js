@@ -41,7 +41,8 @@ let connectedClients = [];
 let gapHistory      = [];
 let reportData      = [];
 let lastAlertTime   = {};
-let lastContractKey = { '15m': null, '1h': null, '4h': null };
+let lastContractKey  = { '15m': null, '1h': null, '4h': null };
+const prezziApertura = {}; // prezzo Chainlink salvato all'apertura di ogni contratto
 const REPORT_MAX    = 50000;
 
 // ── Telegram ──────────────────────────────────────────────
@@ -323,9 +324,13 @@ async function fetchPolymarket() {
           const downPrice = parseFloat(prices[1]);
           if (isNaN(upPrice) || isNaN(downPrice)) continue;
 
-          const priceToBeat = (m.startPrice && parseFloat(m.startPrice) > 0)
-            ? parseFloat(m.startPrice)
-            : (krakenPrices[asset.krakenSym] || null);
+          // priceToBeat = prezzo Chainlink salvato all'apertura del contratto
+          const prezzoAp = prezziApertura[fin.key + '-' + asset.key];
+          const priceToBeat = prezzoAp
+            ? prezzoAp
+            : (m.startPrice && parseFloat(m.startPrice) > 0)
+              ? parseFloat(m.startPrice)
+              : (chainlinkPrice || krakenPrices[asset.krakenSym] || null);
 
           const existing       = polyMarkets[fin.key][asset.key];
           const isNuovoSlug    = !existing || existing.slug !== item.slug;
