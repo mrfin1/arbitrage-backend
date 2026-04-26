@@ -453,7 +453,12 @@ async function controllaGap() {
           priceToBeat: m.priceToBeat, minRimasti: m.minRimasti
         };
         // Aggiungi segnale alla coda per executor locale Mac
-        segnaliPendenti.push({ ...segnaleExec, tradeSize: (execution.getWalletBase() * 0.05).toFixed(2) });
+        // Include clobTokenIds per fallback se slug non trovato
+        segnaliPendenti.push({
+          ...segnaleExec,
+          tradeSize: (execution.getWalletBase() * 0.05).toFixed(2),
+          clobTokenIds: m.clobTokenIds || null
+        });
         if (segnaliPendenti.length > 10) segnaliPendenti.shift(); // max 10 pendenti
 
         execution.piazzaOrdine(segnaleExec).then(result => {
