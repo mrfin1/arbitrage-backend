@@ -239,7 +239,7 @@ async function verificaEsito(entry) {
       '━━━━━━━━━━━━━━━━━━━━',
       new Date().toUTCString()
     ].join('\n');
-    await sendTelegram(msgEsito);
+    if (entry.ordineIdClob) { await sendTelegram(msgEsito); }
     console.log('[Esito] ' + entry.asset + '/' + entry.finestra + ' → ' + entry.esito + ' | ' + (corretta ? 'CORRETTA ✓' : 'ERRATA ✗'));
   }
 }
