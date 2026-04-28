@@ -792,38 +792,49 @@ async function inviaCsvTelegram(motivo) {
     const a          = reportData[reportData.length-1]?.ts?.slice(11,19) || '—';
 
     const filename = 'report_' + new Date().toISOString().slice(0,16).replace('T','_').replace(':','-') + '.csv';
-    // Stats ultima ora
+    // Stats ultima ora — SOLO ordini reali eseguiti (con ordineIdClob)
     const unaOraFa = Date.now() - 3600000;
     const reportUltimaOra = reportData.filter(r => new Date(r.ts).getTime() > unaOraFa);
-    const segnaliOra = reportUltimaOra.filter(r => r.direzione);
-    const verificatiOra = reportUltimaOra.filter(r => r.esito && r.direzione);
-    const correttiOra = verificatiOra.filter(r => r.direzCorretta === true);
+    const segnaliOra    = reportUltimaOra.filter(r => r.direzione && r.ordineIdClob);
+    const verificatiOra = segnaliOra.filter(r => r.esito);
+    const correttiOra   = verificatiOra.filter(r => r.direzCorretta === true);
+    const persiOra      = verificatiOra.filter(r => r.direzCorretta === false);
     const wrOra = verificatiOra.length ? (correttiOra.length/verificatiOra.length*100).toFixed(1) : 'N/A';
 
-    // Stats totali da avvio
+    // Stats totali da avvio — SOLO ordini reali
+    const tuttiReali    = reportData.filter(r => r.direzione && r.ordineIdClob);
+    const verificatiReal = tuttiReali.filter(r => r.esito);
+    const correttiReal  = verificatiReal.filter(r => r.direzCorretta === true);
+    const wrReal = verificatiReal.length ? (correttiReal.length/verificatiReal.length*100).toFixed(1) : 'N/A';
+
     const execution = require('./execution');
     const statoExe = execution.getStato();
     const walletAttuale = statoExe.walletStimato || 100;
     const pnlTotale = (walletAttuale - 100).toFixed(2);
     const startTime = reportData.length ? reportData[0].ts.slice(0,16).replace('T',' ') : '—';
 
-    // P&L ultima ora stimato
-    const pnlOra = segnaliOra.reduce((s,r) => s+(r.pnlWallet||r.pnl1k/1000*5||0), 0);
+    // P&L reale ultima ora
+    const pnlOra = segnaliOra.reduce((s,r) => {
+      if (!r.esito) return s;
+      const tc = r.prezzoContratto ? ((100 - r.prezzoContratto) - 3) / 100 : 0;
+      const ts = walletAttuale * 0.05;
+      return s + (r.direzCorretta ? tc * ts : -ts);
+    }, 0);
 
     const caption = '📊 <b>REPORT ORARIO — ' + new Date().toUTCString().slice(17,22) + ' UTC</b>\n' +
       '━━━━━━━━━━━━━━━━━━━━\n' +
-      '<b>ULTIMA ORA</b>\n' +
-      '🔢 Operazioni: <b>' + segnaliOra.length + '</b>\n' +
+      '<b>ULTIMA ORA (ordini reali)</b>\n' +
+      '🔢 Eseguiti: <b>' + segnaliOra.length + '</b>\n' +
       '✅ Vincenti: <b>' + correttiOra.length + '</b>\n' +
-      '❌ Perdenti: <b>' + (verificatiOra.length - correttiOra.length) + '</b>\n' +
+      '❌ Perdenti: <b>' + persiOra.length + '</b>\n' +
       '📈 Win rate: <b>' + wrOra + '%</b>\n' +
       '💵 P&L ora: <b>' + (pnlOra>=0?'+':'') + '$' + Math.abs(pnlOra).toFixed(2) + '</b>\n' +
       '━━━━━━━━━━━━━━━━━━━━\n' +
-      '<b>DA AVVIO SOFTWARE</b>\n' +
-      '🔢 Operazioni totali: <b>' + segnali.length + '</b>\n' +
-      '✅ Vincenti: <b>' + corretti.length + '</b>\n' +
-      '❌ Perdenti: <b>' + (verificati.length - corretti.length) + '</b>\n' +
-      '📈 Win rate totale: <b>' + winRate + '%</b>\n' +
+      '<b>DA AVVIO (ordini reali)</b>\n' +
+      '🔢 Totale eseguiti: <b>' + tuttiReali.length + '</b>\n' +
+      '✅ Vincenti: <b>' + correttiReal.length + '</b>\n' +
+      '❌ Perdenti: <b>' + (verificatiReal.length - correttiReal.length) + '</b>\n' +
+      '📈 Win rate reale: <b>' + wrReal + '%</b>\n' +
       '💰 Wallet: <b>$100.00 → $' + walletAttuale.toFixed(2) + '</b>\n' +
       '💵 P&L totale: <b>' + (pnlTotale>=0?'+':'') + '$' + Math.abs(pnlTotale) + '</b>\n' +
       '📅 Attivo da: <b>' + startTime + ' UTC</b>\n' +
